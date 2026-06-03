@@ -1,0 +1,48 @@
+name: AI Review (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      pr-number:
+        required: true
+        type: number
+      mode:
+        required: false
+        type: string
+        default: review
+    secrets:
+      mistral-api-key:
+        required: true
+
+jobs:
+  ai-review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          repository: nubster-opensources/.github
+          ref: main
+
+      - uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: "1.88.0"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "tools/ai-review -> tools/ai-review/target"
+
+      - name: Build
+        run: cargo build --release --manifest-path tools/ai-review/Cargo.toml
+
+      - name: Run
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          MISTRAL_API_KEY: ${{ secrets.mistral-api-key }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ inputs.pr-number }}
+          AI_MODE: ${{ inputs.mode }}
+        run: ./tools/ai-review/target/release/ai-review
