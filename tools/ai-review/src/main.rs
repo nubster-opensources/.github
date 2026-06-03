@@ -1,6 +1,7 @@
 mod github;
 mod mistral;
 mod review;
+mod team;
 mod types;
 
 use anyhow::Context;
