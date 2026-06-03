@@ -1,17 +1,87 @@
 #![allow(clippy::missing_errors_doc)]
 
+use std::collections::HashMap;
 use std::fmt::Write as _;
 
 use anyhow::Context;
 use octocrab::Octocrab;
 
 use crate::review::has_bot_marker;
+use crate::types::SynthFinding;
 
 /// An inline comment to post on a specific file line.
 pub struct InlineComment {
     pub path: String,
     pub line: u32,
     pub body: String,
+}
+
+/// Maximum bytes of the full diff handed to a lens as fallback context when a
+/// finding has no per-file patch (file-level or cross-file findings).
+const PATCH_FALLBACK_CHARS: usize = 8_000;
+
+/// The PR diff in two shapes: a concatenated view and a per-file patch map.
+pub struct DiffContext {
+    pub full: String,
+    pub by_file: HashMap<String, String>,
+    pub file_count: usize,
+}
+
+impl DiffContext {
+    /// Returns the patch to hand to a lens for `finding`, falling back to a
+    /// truncated view of the full diff for file-level or cross-file findings.
+    #[must_use]
+    pub fn patch_for(&self, finding: &SynthFinding) -> &str {
+        match self.by_file.get(&finding.file) {
+            Some(patch) if !patch.is_empty() => patch.as_str(),
+            _ => safe_truncate(&self.full, PATCH_FALLBACK_CHARS),
+        }
+    }
+}
+
+/// Truncates `s` to at most `max` bytes without splitting a UTF-8 sequence.
+fn safe_truncate(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
+/// Returns the PR diff as a [`DiffContext`] (concatenated view plus per-file map).
+pub async fn fetch_diff_context(
+    octo: &Octocrab,
+    owner: &str,
+    repo: &str,
+    pr_number: u64,
+) -> anyhow::Result<DiffContext> {
+    let files = octo
+        .pulls(owner, repo)
+        .list_files(pr_number)
+        .await
+        .context("failed to list PR files")?;
+
+    let file_count = files.items.len();
+    let mut full = String::new();
+    let mut by_file = HashMap::with_capacity(file_count);
+
+    for file in &files.items {
+        writeln!(full, "--- {}", file.filename).unwrap();
+        if let Some(patch) = &file.patch {
+            full.push_str(patch);
+            by_file.insert(file.filename.clone(), patch.clone());
+        }
+        full.push('\n');
+    }
+
+    Ok(DiffContext {
+        full,
+        by_file,
+        file_count,
+    })
 }
 
 /// Returns (concatenated diff as string, number of changed files).
@@ -21,24 +91,8 @@ pub async fn fetch_diff(
     repo: &str,
     pr_number: u64,
 ) -> anyhow::Result<(String, usize)> {
-    let files = octo
-        .pulls(owner, repo)
-        .list_files(pr_number)
-        .await
-        .context("failed to list PR files")?;
-
-    let count = files.items.len();
-    let mut diff = String::new();
-
-    for file in &files.items {
-        writeln!(diff, "--- {}", file.filename).unwrap();
-        if let Some(patch) = &file.patch {
-            diff.push_str(patch);
-        }
-        diff.push('\n');
-    }
-
-    Ok((diff, count))
+    let ctx = fetch_diff_context(octo, owner, repo, pr_number).await?;
+    Ok((ctx.full, ctx.file_count))
 }
 
 /// Returns the current PR body (empty string if None).

@@ -1,12 +1,21 @@
 #![allow(clippy::missing_errors_doc)]
 
+use std::fmt::Write as _;
+
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
-use crate::types::ReviewResponse;
+use crate::types::{Agent, Lens, LensVerdict, ReviewResponse, Severity, SynthReport};
 
 const API_URL: &str = "https://api.mistral.ai/v1/chat/completions";
 const MAX_DIFF_CHARS: usize = 20_000;
+
+/// Model used by the four specialist agents in team mode.
+pub(crate) const TEAM_AGENT_MODEL: &str = "codestral-latest";
+/// Model used by the synthesis step in team mode (stronger cross-report reasoning).
+pub(crate) const TEAM_SYNTH_MODEL: &str = "mistral-large-latest";
+/// Model used by the adversarial lenses in team mode.
+pub(crate) const TEAM_LENS_MODEL: &str = "codestral-latest";
 
 #[derive(Serialize)]
 struct ChatRequest {
@@ -424,6 +433,172 @@ pub async fn call_describe(
         serde_json::from_str(&raw).context("failed to parse Mistral describe response")?;
 
     Ok(parsed.body)
+}
+
+fn synthesis_system_prompt() -> String {
+    r#"You are the lead reviewer for Nubster, a sovereign hybrid DevOps platform (Rust/.NET/TypeScript). Four specialist agents (correctness, security, architecture, performance) have each independently reviewed the SAME pull request. Your job is to MERGE their reports into one deduplicated review, not to add new findings.
+
+## Your tasks
+1. Deduplicate: when several agents report the same underlying issue (even if worded differently or on nearby lines), merge them into ONE finding.
+2. Attribute: record every contributing agent in "sources", e.g. ["security","correctness"].
+3. Preserve signal: when merging duplicates, keep the HIGHEST severity. Never drop a critical.
+4. Stay grounded: do NOT invent findings that no agent raised. You may only merge and rewrite for clarity.
+5. Cut the noise: drop findings that are purely stylistic, cosmetic, or already enforced by Clippy or the compiler (formatting, naming, import ordering, unused warnings). Nubster runs Clippy pedantic with -D warnings in CI, so these add no value.
+6. Anchor to code: every "message" MUST name the concrete code element involved (a function, type, variable, or call) so it can be verified against the diff.
+7. Categorise: tag each finding with a "category" from ["bug","security","design","performance","test-gap"].
+8. Surface disagreement: if two agents contradict each other on the same point, state that explicitly in the message instead of silently choosing a side.
+9. Summarise: write a 3-5 sentence executive summary of what the PR does and its overall quality, and list concrete strengths.
+10. Do NOT emit a verdict or recommendation — that is computed deterministically downstream.
+
+Respond ONLY with a valid JSON object:
+{
+  "executive_summary": "3-5 sentences on what the PR does and its overall quality.",
+  "strengths": ["specific strength 1", "specific strength 2"],
+  "findings": [
+    {
+      "file": "exact/path/from/the/reports.rs",
+      "line": 42,
+      "severity": "critical",
+      "category": "security",
+      "message": "Names the concrete code element and the issue in one sentence.",
+      "sources": ["security", "correctness"]
+    }
+  ]
+}
+
+Rules: severity MUST be "critical" or "minor". category MUST be one of ["bug","security","design","performance","test-gap"]. line MUST be the line from the reports, or 0 for a file-level concern. sources MUST be a non-empty subset of ["correctness","security","architecture","performance"]. Return valid JSON only, no markdown fences."#
+        .to_string()
+}
+
+const LENS_OUTPUT_SPEC: &str = r#"Respond ONLY with a valid JSON object:
+{ "contested": true, "reason": "one-sentence justification grounded in the shown code" }
+
+"contested": true  means the finding should NOT be trusted and acted on as-is.
+"contested": false means the shown code confirms a genuine, in-scope issue.
+When you are uncertain, set "contested": true. Return valid JSON only, no markdown fences."#;
+
+fn lens_system_prompt(lens: Lens) -> String {
+    let intro = match lens {
+        Lens::CodeConfirms => "You are a skeptical code verifier reviewing a pull request for Nubster. You are given a single review finding and the patch of the file it refers to. Decide whether the shown code UNAMBIGUOUSLY confirms the problem: you must be able to point to the exact changed lines that exhibit it. If the patch does not clearly prove the claim, set contested = true.",
+        Lens::RealImpact => "You are a skeptical impact assessor reviewing a pull request for Nubster. You are given a single review finding and the patch of the file it refers to. Decide whether the finding has REAL, observable impact: a reproducible bug, an exploitable vulnerability, or a measurable regression. If the concern is purely theoretical, stylistic, cosmetic, or already caught by the compiler or Clippy, set contested = true.",
+        Lens::FalsePositive => "You are a skeptical false-positive hunter reviewing a pull request for Nubster. You are given a single review finding and the patch of the file it refers to. Decide whether this is a classic false positive: already handled elsewhere, out of scope of this diff, intentional by design, or something the compiler or Clippy already enforces. If it looks like a false positive, set contested = true.",
+    };
+    format!("{intro}\n\n{LENS_OUTPUT_SPEC}")
+}
+
+fn agent_system_prompt(agent: Agent) -> String {
+    match agent {
+        Agent::Correctness => review_system_prompt(),
+        Agent::Security => security_system_prompt(),
+        Agent::Architecture => architecture_system_prompt(),
+        Agent::Performance => performance_system_prompt(),
+    }
+}
+
+fn render_reports_for_synthesis(reports: &[(Agent, ReviewResponse)]) -> String {
+    let mut out = String::new();
+    for (agent, report) in reports {
+        let _ = writeln!(out, "## {} agent", agent.label());
+        let _ = writeln!(out, "Summary: {}", report.summary);
+        if !report.findings.is_empty() {
+            out.push_str("Findings:\n");
+            for f in &report.findings {
+                let sev = match f.severity {
+                    Severity::Critical => "critical",
+                    Severity::Minor => "minor",
+                };
+                let _ = writeln!(out, "- [{sev}] {}:{} {}", f.file, f.line, f.message);
+            }
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// Runs one specialist agent over the diff. Returns `(ReviewResponse, truncated)`.
+pub async fn call_agent(
+    client: &reqwest::Client,
+    api_key: &str,
+    agent: Agent,
+    diff: &str,
+) -> anyhow::Result<(ReviewResponse, bool)> {
+    call_analysis_mode(
+        client,
+        api_key,
+        TEAM_AGENT_MODEL,
+        agent_system_prompt(agent),
+        diff,
+    )
+    .await
+}
+
+/// Merges the specialist agent reports into a single deduplicated [`SynthReport`].
+pub async fn call_synthesis(
+    client: &reqwest::Client,
+    api_key: &str,
+    diff: &str,
+    reports: &[(Agent, ReviewResponse)],
+) -> anyhow::Result<SynthReport> {
+    let (content, _) = truncate_diff(diff);
+    let agents_block = render_reports_for_synthesis(reports);
+
+    let request = ChatRequest {
+        model: TEAM_SYNTH_MODEL.to_string(),
+        messages: vec![
+            Message {
+                role: "system".to_string(),
+                content: synthesis_system_prompt(),
+            },
+            Message {
+                role: "user".to_string(),
+                content: format!(
+                    "Specialist agent reports for a pull request:\n\n{agents_block}\nThe PR diff under review:\n\n{content}"
+                ),
+            },
+        ],
+        response_format: ResponseFormat {
+            kind: "json_object",
+        },
+        temperature: 0.2,
+    };
+
+    let raw = send_request(client, api_key, &request).await?;
+    serde_json::from_str(&raw).context("failed to parse Mistral synthesis response")
+}
+
+/// Runs one adversarial lens over a single finding, given the file's patch.
+pub async fn call_lens(
+    client: &reqwest::Client,
+    api_key: &str,
+    lens: Lens,
+    file: &str,
+    message: &str,
+    patch: &str,
+) -> anyhow::Result<LensVerdict> {
+    let (patch_content, _) = truncate_diff(patch);
+
+    let request = ChatRequest {
+        model: TEAM_LENS_MODEL.to_string(),
+        messages: vec![
+            Message {
+                role: "system".to_string(),
+                content: lens_system_prompt(lens),
+            },
+            Message {
+                role: "user".to_string(),
+                content: format!(
+                    "Finding to scrutinise:\nFile: {file}\nClaim: {message}\n\nCode under review (patch of {file}):\n\n{patch_content}"
+                ),
+            },
+        ],
+        response_format: ResponseFormat {
+            kind: "json_object",
+        },
+        temperature: 0.0,
+    };
+
+    let raw = send_request(client, api_key, &request).await?;
+    serde_json::from_str(&raw).context("failed to parse Mistral lens response")
 }
 
 fn truncate_diff(diff: &str) -> (&str, bool) {
