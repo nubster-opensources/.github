@@ -177,7 +177,7 @@ fn render_finding_line(f: &SynthFinding) -> String {
         format!(" _(via {})_", f.sources.join(", "))
     };
     format!(
-        "- {sev} `{}` **{}** — {}{}",
+        "- {sev} `{}` **{}** : {}{}",
         f.category.label(),
         location,
         f.message,
