@@ -33,7 +33,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: "tools/ai-review -> tools/ai-review/target"
+          workspaces: "."
 
       - name: Build
         run: cargo build --release --manifest-path tools/ai-review/Cargo.toml
@@ -45,4 +45,4 @@ jobs:
           GITHUB_REPOSITORY: ${{ github.repository }}
           PR_NUMBER: ${{ inputs.pr-number }}
           AI_MODE: ${{ inputs.mode }}
-        run: ./tools/ai-review/target/release/ai-review
+        run: ./target/release/ai-review
