@@ -23,11 +23,13 @@ pub struct ReviewResponse {
     pub security: String,
 }
 
+#[allow(dead_code)]
 pub enum Mode {
     Review,
     Describe,
 }
 
+#[allow(dead_code)]
 impl Mode {
     pub fn from_env() -> anyhow::Result<Self> {
         match std::env::var("AI_MODE").as_deref() {
