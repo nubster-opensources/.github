@@ -21,14 +21,12 @@ pub struct InlineComment {
 const PATCH_FALLBACK_CHARS: usize = 8_000;
 
 /// The PR diff in two shapes: a concatenated view and a per-file patch map.
-#[allow(dead_code)]
 pub struct DiffContext {
     pub full: String,
     pub by_file: HashMap<String, String>,
     pub file_count: usize,
 }
 
-#[allow(dead_code)]
 impl DiffContext {
     /// Returns the patch to hand to a lens for `finding`, falling back to a
     /// truncated view of the full diff for file-level or cross-file findings.

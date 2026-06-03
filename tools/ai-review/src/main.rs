@@ -55,6 +55,9 @@ async fn main() -> anyhow::Result<()> {
         Mode::Describe => {
             run_describe(&clients, owner, repo, pr_number).await?;
         }
+        Mode::Team => {
+            team::run_team(&clients, owner, repo, pr_number).await?;
+        }
     }
 
     Ok(())

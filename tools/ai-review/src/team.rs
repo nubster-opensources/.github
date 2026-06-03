@@ -1,5 +1,4 @@
 #![allow(clippy::missing_errors_doc)]
-#![allow(dead_code)]
 
 use std::sync::Arc;
 
@@ -160,7 +159,7 @@ async fn verify_findings(
     findings: &[SynthFinding],
 ) -> Vec<FindingVerdict> {
     let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_CALLS));
-    let mut set: JoinSet<(usize, anyhow::Result<LensVerdict>)> = JoinSet::new();
+    let mut set: JoinSet<(usize, Lens, anyhow::Result<LensVerdict>)> = JoinSet::new();
 
     for (idx, finding) in findings.iter().enumerate() {
         let patch = ctx.patch_for(finding).to_owned();
@@ -174,7 +173,7 @@ async fn verify_findings(
             set.spawn(async move {
                 let _permit = permit_source.acquire_owned().await.ok();
                 let result = mistral::call_lens(&client, &key, lens, &file, &message, &patch).await;
-                (idx, result)
+                (idx, lens, result)
             });
         }
     }
@@ -182,9 +181,12 @@ async fn verify_findings(
     let mut votes: Vec<Vec<LensVerdict>> = (0..findings.len()).map(|_| Vec::new()).collect();
     while let Some(joined) = set.join_next().await {
         match joined {
-            Ok((idx, Ok(verdict))) => votes[idx].push(verdict),
-            Ok((idx, Err(error))) => {
-                eprintln!("warning: a lens failed for finding {idx}: {error}");
+            Ok((idx, _, Ok(verdict))) => votes[idx].push(verdict),
+            Ok((idx, lens, Err(error))) => {
+                eprintln!(
+                    "warning: {} lens failed for finding {idx}: {error}",
+                    lens.label()
+                );
             }
             Err(error) => eprintln!("warning: a lens task did not complete: {error}"),
         }

@@ -516,7 +516,6 @@ fn render_reports_for_synthesis(reports: &[(Agent, ReviewResponse)]) -> String {
 }
 
 /// Runs one specialist agent over the diff. Returns `(ReviewResponse, truncated)`.
-#[allow(dead_code)]
 pub async fn call_agent(
     client: &reqwest::Client,
     api_key: &str,
@@ -534,7 +533,6 @@ pub async fn call_agent(
 }
 
 /// Merges the specialist agent reports into a single deduplicated [`SynthReport`].
-#[allow(dead_code)]
 pub async fn call_synthesis(
     client: &reqwest::Client,
     api_key: &str,
@@ -569,7 +567,6 @@ pub async fn call_synthesis(
 }
 
 /// Runs one adversarial lens over a single finding, given the file's patch.
-#[allow(dead_code)]
 pub async fn call_lens(
     client: &reqwest::Client,
     api_key: &str,

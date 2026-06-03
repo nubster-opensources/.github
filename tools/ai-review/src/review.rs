@@ -70,7 +70,6 @@ pub fn has_bot_marker(body: &str, marker: &str) -> bool {
 }
 
 /// Input bundle for [`render_team_comment`], grouped to keep the argument count low.
-#[allow(dead_code)]
 pub struct TeamCommentView<'a> {
     pub executive_summary: &'a str,
     pub strengths: &'a [String],
@@ -86,7 +85,6 @@ pub struct TeamCommentView<'a> {
 }
 
 /// Renders the team-mode global comment (with hidden upsert marker).
-#[allow(dead_code)]
 #[must_use]
 pub fn render_team_comment(view: &TeamCommentView) -> String {
     let mut md = "<!-- ai-team-bot -->\n## Team Review IA\n\n".to_string();

@@ -23,7 +23,6 @@ pub struct ReviewResponse {
     pub security: String,
 }
 
-#[allow(dead_code)]
 pub enum Mode {
     Review,
     Describe,
@@ -31,9 +30,9 @@ pub enum Mode {
     Architecture,
     Performance,
     Product,
+    Team,
 }
 
-#[allow(dead_code)]
 impl Mode {
     pub fn from_env() -> anyhow::Result<Self> {
         match std::env::var("AI_MODE").as_deref() {
@@ -43,13 +42,14 @@ impl Mode {
             Ok("architecture") => Ok(Self::Architecture),
             Ok("performance") => Ok(Self::Performance),
             Ok("product") => Ok(Self::Product),
+            Ok("team") => Ok(Self::Team),
             Ok(other) => anyhow::bail!("unknown AI_MODE: {other}"),
         }
     }
 
     pub fn mistral_model(&self) -> &'static str {
         match self {
-            Self::Review | Self::Security | Self::Architecture | Self::Performance => {
+            Self::Review | Self::Security | Self::Architecture | Self::Performance | Self::Team => {
                 "codestral-latest"
             }
             Self::Describe | Self::Product => "mistral-small-latest",
@@ -63,6 +63,7 @@ impl Mode {
             Self::Architecture => "<!-- ai-architecture-bot -->",
             Self::Performance => "<!-- ai-performance-bot -->",
             Self::Product => "<!-- ai-product-bot -->",
+            Self::Team => "<!-- ai-team-bot -->",
             Self::Describe => "",
         }
     }
@@ -74,6 +75,7 @@ impl Mode {
             Self::Architecture => "Architecture Review",
             Self::Performance => "Performance Review",
             Self::Product => "Product Review",
+            Self::Team => "Team Review",
             Self::Describe => "Description",
         }
     }
@@ -81,7 +83,6 @@ impl Mode {
 
 /// One of the four specialised review angles run in parallel in team mode.
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
 pub enum Agent {
     Correctness,
     Security,
@@ -89,7 +90,6 @@ pub enum Agent {
     Performance,
 }
 
-#[allow(dead_code)]
 impl Agent {
     /// Returns the human-readable label for this agent.
     pub fn label(self) -> &'static str {
@@ -104,14 +104,12 @@ impl Agent {
 
 /// One adversarial lens applied to a synthesised finding during verification.
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
 pub enum Lens {
     CodeConfirms,
     RealImpact,
     FalsePositive,
 }
 
-#[allow(dead_code)]
 impl Lens {
     /// Returns the human-readable label for this lens.
     pub fn label(self) -> &'static str {
@@ -126,7 +124,6 @@ impl Lens {
 /// The kind of issue a synthesised finding describes.
 #[derive(Debug, Deserialize, Clone, Copy, PartialEq)]
 #[serde(rename_all = "kebab-case")]
-#[allow(dead_code)]
 pub enum Category {
     Bug,
     Security,
@@ -137,7 +134,6 @@ pub enum Category {
     Other,
 }
 
-#[allow(dead_code)]
 impl Category {
     /// Returns the human-readable label for this category.
     pub fn label(self) -> &'static str {
@@ -154,7 +150,6 @@ impl Category {
 
 /// A finding merged by the synthesis agent, tracking which agents raised it.
 #[derive(Debug, Deserialize, Clone)]
-#[allow(dead_code)]
 pub struct SynthFinding {
     pub file: String,
     #[serde(default)]
@@ -170,7 +165,6 @@ pub struct SynthFinding {
 
 /// Output of the synthesis agent: a merged, deduplicated cross-agent review.
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
 pub struct SynthReport {
     pub executive_summary: String,
     #[serde(default)]
@@ -181,7 +175,6 @@ pub struct SynthReport {
 
 /// Verdict returned by one adversarial lens for a single finding.
 #[derive(Debug, Deserialize, Clone)]
-#[allow(dead_code)]
 pub struct LensVerdict {
     #[serde(deserialize_with = "de_bool_loose")]
     pub contested: bool,
@@ -190,7 +183,6 @@ pub struct LensVerdict {
 
 /// Aggregated verdict for one finding after the multi-lens vote.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct FindingVerdict {
     pub contested: bool,
     pub reasons: Vec<String>,
@@ -198,7 +190,6 @@ pub struct FindingVerdict {
 
 /// Final overall verdict computed deterministically after verification.
 #[derive(Debug, Clone, Copy, PartialEq)]
-#[allow(dead_code)]
 pub enum Verdict {
     Ship,
     NeedsWork,
