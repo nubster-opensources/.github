@@ -1,4 +1,6 @@
 #[allow(dead_code)]
+mod github;
+#[allow(dead_code)]
 mod mistral;
 #[allow(dead_code)]
 mod review;
