@@ -104,13 +104,15 @@ pub async fn call_review(
                 content: format!("Review this pull request diff:\n\n{content}"),
             },
         ],
-        response_format: ResponseFormat { kind: "json_object" },
+        response_format: ResponseFormat {
+            kind: "json_object",
+        },
         temperature: 0.1,
     };
 
     let raw = send_request(client, api_key, &request).await?;
-    let response: ReviewResponse = serde_json::from_str(&raw)
-        .context("failed to parse Mistral review response as JSON")?;
+    let response: ReviewResponse =
+        serde_json::from_str(&raw).context("failed to parse Mistral review response as JSON")?;
 
     Ok((response, truncated))
 }
@@ -136,7 +138,9 @@ pub async fn call_describe(
                 content: format!("Generate a PR description for this diff:\n\n{content}"),
             },
         ],
-        response_format: ResponseFormat { kind: "json_object" },
+        response_format: ResponseFormat {
+            kind: "json_object",
+        },
         temperature: 0.3,
     };
 

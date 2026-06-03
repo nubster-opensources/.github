@@ -34,14 +34,14 @@ impl Mode {
     pub fn from_env() -> anyhow::Result<Self> {
         match std::env::var("AI_MODE").as_deref() {
             Ok("review") | Err(_) => Ok(Self::Review),
-            Ok("describe")        => Ok(Self::Describe),
-            Ok(other)             => anyhow::bail!("unknown AI_MODE: {other}"),
+            Ok("describe") => Ok(Self::Describe),
+            Ok(other) => anyhow::bail!("unknown AI_MODE: {other}"),
         }
     }
 
     pub fn mistral_model(&self) -> &'static str {
         match self {
-            Self::Review   => "codestral-latest",
+            Self::Review => "codestral-latest",
             Self::Describe => "mistral-small-latest",
         }
     }

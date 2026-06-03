@@ -158,9 +158,7 @@ pub async fn post_inline_comments(
         comments: gh_comments,
     };
 
-    let url = format!(
-        "https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}/reviews"
-    );
+    let url = format!("https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}/reviews");
 
     let client = reqwest::Client::builder()
         .user_agent("ai-review-bot/0.1")

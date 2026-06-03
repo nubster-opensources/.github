@@ -17,16 +17,13 @@ async fn main() -> anyhow::Result<()> {
         .parse()
         .context("PR_NUMBER must be a number")?;
 
-    let repository =
-        std::env::var("GITHUB_REPOSITORY").context("GITHUB_REPOSITORY not set")?;
+    let repository = std::env::var("GITHUB_REPOSITORY").context("GITHUB_REPOSITORY not set")?;
     let (owner, repo) = repository
         .split_once('/')
         .context("GITHUB_REPOSITORY must be in owner/repo format")?;
 
-    let github_token =
-        std::env::var("GITHUB_TOKEN").context("GITHUB_TOKEN not set")?;
-    let mistral_key =
-        std::env::var("MISTRAL_API_KEY").context("MISTRAL_API_KEY not set")?;
+    let github_token = std::env::var("GITHUB_TOKEN").context("GITHUB_TOKEN not set")?;
+    let mistral_key = std::env::var("MISTRAL_API_KEY").context("MISTRAL_API_KEY not set")?;
 
     let octo = OctocrabBuilder::default()
         .personal_token(github_token.clone())
@@ -39,8 +36,16 @@ async fn main() -> anyhow::Result<()> {
 
     match mode {
         Mode::Review => {
-            run_review(&octo, &http, &github_token, &mistral_key, owner, repo, pr_number)
-                .await?;
+            run_review(
+                &octo,
+                &http,
+                &github_token,
+                &mistral_key,
+                owner,
+                repo,
+                pr_number,
+            )
+            .await?;
         }
         Mode::Describe => {
             run_describe(&octo, &http, &mistral_key, owner, repo, pr_number).await?;
@@ -69,8 +74,7 @@ async fn run_review(
 
     let model = Mode::Review.mistral_model();
     println!("Calling Mistral ({model})…");
-    let (response, truncated) =
-        mistral::call_review(http, mistral_key, model, &diff).await?;
+    let (response, truncated) = mistral::call_review(http, mistral_key, model, &diff).await?;
 
     let global_body = review::render_global_comment(&response, file_count, model, truncated);
     println!("Upserting global comment…");
@@ -89,15 +93,8 @@ async fn run_review(
             .collect();
 
         println!("Posting {} inline comment(s)…", comments.len());
-        github::post_inline_comments(
-            github_token,
-            owner,
-            repo,
-            pr_number,
-            &head_sha,
-            &comments,
-        )
-        .await?;
+        github::post_inline_comments(github_token, owner, repo, pr_number, &head_sha, &comments)
+            .await?;
     }
 
     println!("Review complete.");
@@ -113,8 +110,7 @@ async fn run_describe(
     pr_number: u64,
 ) -> anyhow::Result<()> {
     let current_body = github::fetch_pr_body(octo, owner, repo, pr_number).await?;
-    let is_empty = current_body.trim().is_empty()
-        || current_body.trim().starts_with("<!--");
+    let is_empty = current_body.trim().is_empty() || current_body.trim().starts_with("<!--");
 
     if !is_empty {
         println!("PR body already set — skipping describe mode.");
