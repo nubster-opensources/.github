@@ -2,8 +2,6 @@ use std::fmt::Write as _;
 
 use crate::types::{Finding, ReviewResponse, Severity};
 
-const MARKER: &str = "<!-- ai-review-bot -->";
-
 /// Findings that become inline PR comments: critical severity AND specific line.
 pub fn inline_findings(response: &ReviewResponse) -> Vec<&Finding> {
     response
@@ -28,8 +26,10 @@ pub fn render_global_comment(
     file_count: usize,
     model: &str,
     truncated: bool,
+    marker: &str,
+    label: &str,
 ) -> String {
-    let mut md = format!("{MARKER}\n## Review IA\n\n");
+    let mut md = format!("{marker}\n## {label} IA\n\n");
 
     write!(md, "### Vue d'ensemble\n{}\n\n", response.summary).unwrap();
 
@@ -50,7 +50,9 @@ pub fn render_global_comment(
         md.push('\n');
     }
 
-    write!(md, "### Sécurité\n{}\n\n", response.security).unwrap();
+    if !response.security.starts_with("N/A") {
+        write!(md, "### Sécurité\n{}\n\n", response.security).unwrap();
+    }
 
     md.push_str("---\n");
     if truncated {
@@ -61,8 +63,8 @@ pub fn render_global_comment(
     md
 }
 
-pub fn has_bot_marker(body: &str) -> bool {
-    body.contains(MARKER)
+pub fn has_bot_marker(body: &str, marker: &str) -> bool {
+    body.contains(marker)
 }
 
 #[cfg(test)]
@@ -116,8 +118,16 @@ mod tests {
     #[test]
     fn renders_marker_in_global_comment() {
         let r = make_response();
-        let comment = render_global_comment(&r, 3, "codestral-latest", false);
+        let comment = render_global_comment(
+            &r,
+            3,
+            "codestral-latest",
+            false,
+            "<!-- ai-review-bot -->",
+            "Code Review",
+        );
         assert!(comment.starts_with("<!-- ai-review-bot -->"));
+        assert!(comment.contains("Code Review IA"));
         assert!(comment.contains("Adds manifest parsing."));
         assert!(comment.contains("Points forts"));
         assert!(comment.contains("Sécurité"));
@@ -125,15 +135,47 @@ mod tests {
     }
 
     #[test]
+    fn renders_security_mode_marker() {
+        let r = make_response();
+        let comment = render_global_comment(
+            &r,
+            2,
+            "codestral-latest",
+            false,
+            "<!-- ai-security-bot -->",
+            "Security Review",
+        );
+        assert!(comment.starts_with("<!-- ai-security-bot -->"));
+        assert!(comment.contains("Security Review IA"));
+    }
+
+    #[test]
     fn renders_truncation_warning_when_truncated() {
         let r = make_response();
-        let comment = render_global_comment(&r, 50, "codestral-latest", true);
+        let comment = render_global_comment(
+            &r,
+            50,
+            "codestral-latest",
+            true,
+            "<!-- ai-review-bot -->",
+            "Code Review",
+        );
         assert!(comment.contains("Diff tronqué"));
     }
 
     #[test]
     fn detects_bot_marker() {
-        assert!(has_bot_marker("<!-- ai-review-bot -->\n## Review IA"));
-        assert!(!has_bot_marker("Normal comment body"));
+        assert!(has_bot_marker(
+            "<!-- ai-review-bot -->\n## Review IA",
+            "<!-- ai-review-bot -->"
+        ));
+        assert!(!has_bot_marker(
+            "Normal comment body",
+            "<!-- ai-review-bot -->"
+        ));
+        assert!(has_bot_marker(
+            "<!-- ai-security-bot -->\n## Security",
+            "<!-- ai-security-bot -->"
+        ));
     }
 }

@@ -80,6 +80,7 @@ pub async fn upsert_global_comment(
     repo: &str,
     pr_number: u64,
     body: &str,
+    marker: &str,
 ) -> anyhow::Result<()> {
     let comments = octo
         .issues(owner, repo)
@@ -91,7 +92,7 @@ pub async fn upsert_global_comment(
     let existing_id = comments.items.iter().find_map(|c| {
         c.body
             .as_deref()
-            .filter(|b| has_bot_marker(b))
+            .filter(|b| has_bot_marker(b, marker))
             .map(|_| c.id)
     });
 

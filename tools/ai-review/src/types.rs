@@ -27,6 +27,10 @@ pub struct ReviewResponse {
 pub enum Mode {
     Review,
     Describe,
+    Security,
+    Architecture,
+    Performance,
+    Product,
 }
 
 #[allow(dead_code)]
@@ -35,14 +39,42 @@ impl Mode {
         match std::env::var("AI_MODE").as_deref() {
             Ok("review") | Err(_) => Ok(Self::Review),
             Ok("describe") => Ok(Self::Describe),
+            Ok("security") => Ok(Self::Security),
+            Ok("architecture") => Ok(Self::Architecture),
+            Ok("performance") => Ok(Self::Performance),
+            Ok("product") => Ok(Self::Product),
             Ok(other) => anyhow::bail!("unknown AI_MODE: {other}"),
         }
     }
 
     pub fn mistral_model(&self) -> &'static str {
         match self {
-            Self::Review => "codestral-latest",
-            Self::Describe => "mistral-small-latest",
+            Self::Review | Self::Security | Self::Architecture | Self::Performance => {
+                "codestral-latest"
+            }
+            Self::Describe | Self::Product => "mistral-small-latest",
+        }
+    }
+
+    pub fn comment_marker(&self) -> &'static str {
+        match self {
+            Self::Review => "<!-- ai-review-bot -->",
+            Self::Security => "<!-- ai-security-bot -->",
+            Self::Architecture => "<!-- ai-architecture-bot -->",
+            Self::Performance => "<!-- ai-performance-bot -->",
+            Self::Product => "<!-- ai-product-bot -->",
+            Self::Describe => "",
+        }
+    }
+
+    pub fn display_label(&self) -> &'static str {
+        match self {
+            Self::Review => "Code Review",
+            Self::Security => "Security Review",
+            Self::Architecture => "Architecture Review",
+            Self::Performance => "Performance Review",
+            Self::Product => "Product Review",
+            Self::Describe => "Description",
         }
     }
 }
