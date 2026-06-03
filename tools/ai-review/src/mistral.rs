@@ -443,8 +443,12 @@ fn synthesis_system_prompt() -> String {
 2. Attribute: record every contributing agent in "sources", e.g. ["security","correctness"].
 3. Preserve signal: when merging duplicates, keep the HIGHEST severity. Never drop a critical.
 4. Stay grounded: do NOT invent findings that no agent raised. You may only merge and rewrite for clarity.
-5. Summarise: write a 3-5 sentence executive summary of what the PR does and its overall quality, and list concrete strengths.
-6. Do NOT emit a verdict or recommendation — that is computed deterministically downstream.
+5. Cut the noise: drop findings that are purely stylistic, cosmetic, or already enforced by Clippy or the compiler (formatting, naming, import ordering, unused warnings). Nubster runs Clippy pedantic with -D warnings in CI, so these add no value.
+6. Anchor to code: every "message" MUST name the concrete code element involved (a function, type, variable, or call) so it can be verified against the diff.
+7. Categorise: tag each finding with a "category" from ["bug","security","design","performance","test-gap"].
+8. Surface disagreement: if two agents contradict each other on the same point, state that explicitly in the message instead of silently choosing a side.
+9. Summarise: write a 3-5 sentence executive summary of what the PR does and its overall quality, and list concrete strengths.
+10. Do NOT emit a verdict or recommendation — that is computed deterministically downstream.
 
 Respond ONLY with a valid JSON object:
 {
@@ -455,13 +459,14 @@ Respond ONLY with a valid JSON object:
       "file": "exact/path/from/the/reports.rs",
       "line": 42,
       "severity": "critical",
-      "message": "Merged, clear, actionable description in one sentence.",
+      "category": "security",
+      "message": "Names the concrete code element and the issue in one sentence.",
       "sources": ["security", "correctness"]
     }
   ]
 }
 
-Rules: severity MUST be "critical" or "minor". line MUST be the line from the reports, or 0 for a file-level concern. sources MUST be a non-empty subset of ["correctness","security","architecture","performance"]. Return valid JSON only, no markdown fences."#
+Rules: severity MUST be "critical" or "minor". category MUST be one of ["bug","security","design","performance","test-gap"]. line MUST be the line from the reports, or 0 for a file-level concern. sources MUST be a non-empty subset of ["correctness","security","architecture","performance"]. Return valid JSON only, no markdown fences."#
         .to_string()
 }
 

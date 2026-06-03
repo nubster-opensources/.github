@@ -123,6 +123,35 @@ impl Lens {
     }
 }
 
+/// The kind of issue a synthesised finding describes.
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+#[allow(dead_code)]
+pub enum Category {
+    Bug,
+    Security,
+    Design,
+    Performance,
+    TestGap,
+    #[serde(other)]
+    Other,
+}
+
+#[allow(dead_code)]
+impl Category {
+    /// Returns the human-readable label for this category.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Bug => "bug",
+            Self::Security => "security",
+            Self::Design => "design",
+            Self::Performance => "performance",
+            Self::TestGap => "test-gap",
+            Self::Other => "other",
+        }
+    }
+}
+
 /// A finding merged by the synthesis agent, tracking which agents raised it.
 #[derive(Debug, Deserialize, Clone)]
 #[allow(dead_code)]
@@ -132,6 +161,8 @@ pub struct SynthFinding {
     pub line: u32,
     #[serde(default = "default_severity")]
     pub severity: Severity,
+    #[serde(default = "default_category")]
+    pub category: Category,
     pub message: String,
     #[serde(default)]
     pub sources: Vec<String>,
@@ -177,6 +208,11 @@ pub enum Verdict {
 /// Default severity for a finding whose severity field is missing or unparseable.
 fn default_severity() -> Severity {
     Severity::Minor
+}
+
+/// Default category for a finding whose category field is missing.
+fn default_category() -> Category {
+    Category::Other
 }
 
 /// Deserializes a boolean from `true`/`false`, `"true"`/`"false"`, `"yes"`/`"no"`,
@@ -258,12 +294,40 @@ mod tests {
     #[test]
     fn synth_finding_keeps_sources_and_severity() {
         let json = r#"{
-            "file": "src/a.rs", "line": 12, "severity": "critical",
+            "file": "src/a.rs", "line": 12, "severity": "critical", "category": "security",
             "message": "Tenant scoping missing.", "sources": ["security", "correctness"]
         }"#;
         let f: SynthFinding = serde_json::from_str(json).unwrap();
         assert_eq!(f.severity, Severity::Critical);
+        assert_eq!(f.category, Category::Security);
         assert_eq!(f.sources, vec!["security", "correctness"]);
+    }
+
+    #[test]
+    fn synth_finding_category_parses_defaults_and_falls_back() {
+        let known = r#"{"file": "a.rs", "message": "x", "category": "test-gap"}"#;
+        assert_eq!(
+            serde_json::from_str::<SynthFinding>(known)
+                .unwrap()
+                .category,
+            Category::TestGap
+        );
+
+        let unknown = r#"{"file": "a.rs", "message": "x", "category": "whatever"}"#;
+        assert_eq!(
+            serde_json::from_str::<SynthFinding>(unknown)
+                .unwrap()
+                .category,
+            Category::Other
+        );
+
+        let missing = r#"{"file": "a.rs", "message": "x"}"#;
+        assert_eq!(
+            serde_json::from_str::<SynthFinding>(missing)
+                .unwrap()
+                .category,
+            Category::Other
+        );
     }
 
     #[test]
