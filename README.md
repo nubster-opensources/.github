@@ -24,34 +24,37 @@ reusable workflow forwards from its `mode` input.
 
 ### Calling the reusable workflow
 
-Default per-PR review:
-
-```yaml
-jobs:
-  review:
-    uses: nubster-opensources/.github/.github/workflows/ai-review.yml@main
-    with:
-      pr-number: ${{ github.event.pull_request.number }}
-      mode: review
-    secrets:
-      mistral-api-key: ${{ secrets.MISTRAL_API_KEY }}
-```
-
-Team mode is heavier, so trigger it on demand by adding the `ai:team` label to a
-pull request:
+Default per-PR setup, the multi-agent team review plus the PR description.
+The `permissions` block is required: a reusable workflow cannot escalate
+beyond the ceiling set by its caller.
 
 ```yaml
 on:
   pull_request:
-    types: [opened, synchronize, reopened, labeled]
+    types: [opened, synchronize]
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: write
 
 jobs:
   team:
-    if: contains(github.event.pull_request.labels.*.name, 'ai:team')
     uses: nubster-opensources/.github/.github/workflows/ai-review.yml@main
     with:
       pr-number: ${{ github.event.pull_request.number }}
       mode: team
     secrets:
       mistral-api-key: ${{ secrets.MISTRAL_API_KEY }}
+
+  describe:
+    uses: nubster-opensources/.github/.github/workflows/ai-review.yml@main
+    with:
+      pr-number: ${{ github.event.pull_request.number }}
+      mode: describe
+    secrets:
+      mistral-api-key: ${{ secrets.MISTRAL_API_KEY }}
 ```
+
+Any other mode (`review`, `security`, `architecture`, `performance`,
+`product`) can be invoked the same way by passing it as the `mode` input.
