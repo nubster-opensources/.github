@@ -37,6 +37,63 @@ impl DiffContext {
             _ => safe_truncate(&self.full, PATCH_FALLBACK_CHARS),
         }
     }
+
+    /// Reports whether the finding's line falls inside a hunk of its file
+    /// patch: `Some(true)` when it does, `Some(false)` when the patch is
+    /// known and the line belongs to no hunk, and `None` when the question
+    /// cannot be decided (file-level finding or no per-file patch).
+    #[must_use]
+    pub fn line_in_patch(&self, finding: &SynthFinding) -> Option<bool> {
+        if finding.line == 0 {
+            return None;
+        }
+        let patch = self.by_file.get(&finding.file).filter(|p| !p.is_empty())?;
+        let hunks = parse_hunks(patch);
+        if hunks.is_empty() {
+            return None;
+        }
+        Some(hunks.iter().any(|h| h.contains_new_line(finding.line)))
+    }
+}
+
+/// The new-file line range covered by one hunk of a unified diff patch.
+struct Hunk {
+    new_start: u32,
+    new_count: u32,
+}
+
+impl Hunk {
+    /// Returns true when `line` (new-file side) falls inside this hunk.
+    fn contains_new_line(&self, line: u32) -> bool {
+        line >= self.new_start
+            && u64::from(line) < u64::from(self.new_start) + u64::from(self.new_count)
+    }
+}
+
+/// Extracts the hunk ranges of a unified diff patch from its `@@` headers.
+fn parse_hunks(patch: &str) -> Vec<Hunk> {
+    patch
+        .lines()
+        .filter_map(parse_hunk_header)
+        .map(|(new_start, new_count)| Hunk {
+            new_start,
+            new_count,
+        })
+        .collect()
+}
+
+/// Parses the new-file range of a `@@ -a,b +c,d @@` header into (start, count).
+fn parse_hunk_header(line: &str) -> Option<(u32, u32)> {
+    if !line.starts_with("@@") {
+        return None;
+    }
+    let after_plus = line.split('+').nth(1)?;
+    let range_end = after_plus.find([' ', '@'])?;
+    let range = &after_plus[..range_end];
+    match range.split_once(',') {
+        Some((start, count)) => Some((start.parse().ok()?, count.parse().ok()?)),
+        None => Some((range.parse().ok()?, 1)),
+    }
 }
 
 /// Truncates `s` to at most `max` bytes without splitting a UTF-8 sequence.
@@ -253,4 +310,75 @@ pub async fn update_pr_body(
         .await
         .context("failed to update PR body")?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{Category, Severity, SynthFinding};
+
+    const TWO_HUNK_PATCH: &str = "@@ -1,4 +1,5 @@\n fn main() {\n-    let x = 1;\n+    let x = 2;\n+    println!(\"{x}\");\n }\n@@ -10,3 +11,4 @@ fn helper()\n fn helper() {\n+    do_thing();\n }";
+
+    fn finding_at(file: &str, line: u32) -> SynthFinding {
+        SynthFinding {
+            file: file.to_string(),
+            line,
+            severity: Severity::Minor,
+            category: Category::Bug,
+            message: "m".to_string(),
+            sources: vec![],
+        }
+    }
+
+    fn ctx_with(file: &str, patch: &str) -> DiffContext {
+        let mut by_file = HashMap::new();
+        by_file.insert(file.to_string(), patch.to_string());
+        DiffContext {
+            full: format!("--- {file}\n{patch}\n"),
+            by_file,
+            file_count: 1,
+        }
+    }
+
+    #[test]
+    fn parses_standard_hunk_headers() {
+        assert_eq!(parse_hunk_header("@@ -1,4 +1,5 @@"), Some((1, 5)));
+        assert_eq!(
+            parse_hunk_header("@@ -10,3 +11,4 @@ fn helper()"),
+            Some((11, 4))
+        );
+    }
+
+    #[test]
+    fn parses_header_without_count_as_one_line() {
+        assert_eq!(parse_hunk_header("@@ -1 +1 @@"), Some((1, 1)));
+    }
+
+    #[test]
+    fn rejects_malformed_headers() {
+        assert_eq!(parse_hunk_header("@@ garbage @@"), None);
+        assert_eq!(parse_hunk_header("not a header"), None);
+    }
+
+    #[test]
+    fn splits_patch_into_hunk_ranges() {
+        let hunks = parse_hunks(TWO_HUNK_PATCH);
+        assert_eq!(hunks.len(), 2);
+        assert_eq!((hunks[0].new_start, hunks[0].new_count), (1, 5));
+        assert_eq!((hunks[1].new_start, hunks[1].new_count), (11, 4));
+    }
+
+    #[test]
+    fn line_in_patch_reports_hunk_membership() {
+        let ctx = ctx_with("src/lib.rs", TWO_HUNK_PATCH);
+        assert_eq!(ctx.line_in_patch(&finding_at("src/lib.rs", 3)), Some(true));
+        assert_eq!(ctx.line_in_patch(&finding_at("src/lib.rs", 12)), Some(true));
+        assert_eq!(ctx.line_in_patch(&finding_at("src/lib.rs", 8)), Some(false));
+        assert_eq!(
+            ctx.line_in_patch(&finding_at("src/lib.rs", 999)),
+            Some(false)
+        );
+        assert_eq!(ctx.line_in_patch(&finding_at("src/lib.rs", 0)), None);
+        assert_eq!(ctx.line_in_patch(&finding_at("unknown.rs", 3)), None);
+    }
 }
