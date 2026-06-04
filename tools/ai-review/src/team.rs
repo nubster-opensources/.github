@@ -151,17 +151,47 @@ async fn run_agents(
     (reports, ok, failed)
 }
 
+/// Deterministically contests a finding whose line is known to fall outside
+/// every hunk of its file patch, sparing the lens calls entirely. Findings
+/// without a line, without a per-file patch, or anchored inside a hunk range
+/// are left to the lens vote.
+fn prefilter_verdict(ctx: &github::DiffContext, finding: &SynthFinding) -> Option<FindingVerdict> {
+    if ctx.line_in_patch(finding) == Some(false) {
+        return Some(FindingVerdict {
+            contested: true,
+            reasons: vec![format!(
+                "deterministic check: line {} of {} is not part of this pull request's changes",
+                finding.line, finding.file
+            )],
+        });
+    }
+    None
+}
+
 /// Verifies each finding with the 3-lens adversarial vote under a concurrency
 /// bound, returning one [`FindingVerdict`] per finding (index-aligned).
+/// Findings contested by the deterministic prefilter skip the vote.
 async fn verify_findings(
     clients: &Clients,
     ctx: &github::DiffContext,
     findings: &[SynthFinding],
 ) -> Vec<FindingVerdict> {
+    let prefilled: Vec<Option<FindingVerdict>> = findings
+        .iter()
+        .map(|finding| prefilter_verdict(ctx, finding))
+        .collect();
+    let skipped = prefilled.iter().filter(|slot| slot.is_some()).count();
+    if skipped > 0 {
+        println!("Prefiltered {skipped} finding(s) outside the diff (no lens calls).");
+    }
+
     let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_CALLS));
     let mut set: JoinSet<(usize, Lens, anyhow::Result<LensVerdict>)> = JoinSet::new();
 
     for (idx, finding) in findings.iter().enumerate() {
+        if prefilled[idx].is_some() {
+            continue;
+        }
         let patch = ctx.patch_for(finding).to_owned();
         for lens in LENSES {
             let permit_source = Arc::clone(&semaphore);
@@ -192,7 +222,11 @@ async fn verify_findings(
         }
     }
 
-    votes.iter().map(|v| aggregate_lens_votes(v)).collect()
+    prefilled
+        .into_iter()
+        .enumerate()
+        .map(|(idx, pre)| pre.unwrap_or_else(|| aggregate_lens_votes(&votes[idx])))
+        .collect()
 }
 
 /// Posts inline comments for confirmed, critical, line-located findings.
@@ -353,5 +387,44 @@ mod tests {
         let scored = vec![(finding(Severity::Minor), verdict(false))];
         assert_eq!(compute_verdict(&scored), Verdict::Ship);
         assert_eq!(compute_verdict(&[]), Verdict::Ship);
+    }
+
+    fn finding_in_file(file: &str, line: u32) -> SynthFinding {
+        SynthFinding {
+            file: file.to_string(),
+            line,
+            severity: Severity::Minor,
+            category: Category::Bug,
+            message: "m".to_string(),
+            sources: vec![],
+        }
+    }
+
+    fn diff_ctx(file: &str, patch: &str) -> github::DiffContext {
+        let mut by_file = std::collections::HashMap::new();
+        by_file.insert(file.to_string(), patch.to_string());
+        github::DiffContext {
+            full: format!("--- {file}\n{patch}\n"),
+            by_file,
+            file_count: 1,
+        }
+    }
+
+    const ONE_HUNK_PATCH: &str = "@@ -1,2 +1,3 @@\n fn main() {\n+    init();\n }";
+
+    #[test]
+    fn prefilter_contests_findings_outside_the_diff() {
+        let ctx = diff_ctx("a.rs", ONE_HUNK_PATCH);
+        let verdict = prefilter_verdict(&ctx, &finding_in_file("a.rs", 50)).expect("prefiltered");
+        assert!(verdict.contested);
+        assert!(verdict.reasons[0].contains("line 50"));
+    }
+
+    #[test]
+    fn prefilter_keeps_findings_inside_or_undecidable() {
+        let ctx = diff_ctx("a.rs", ONE_HUNK_PATCH);
+        assert!(prefilter_verdict(&ctx, &finding_in_file("a.rs", 2)).is_none());
+        assert!(prefilter_verdict(&ctx, &finding_in_file("a.rs", 0)).is_none());
+        assert!(prefilter_verdict(&ctx, &finding_in_file("other.rs", 50)).is_none());
     }
 }
