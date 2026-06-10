@@ -353,6 +353,17 @@ mod tests {
         assert!(v.reasons[0].contains("insufficient verification"));
     }
 
+    #[test]
+    fn aggregate_propagates_contested_reasons() {
+        let vote = LensVerdict {
+            contested: true,
+            reason: "wrong smell".to_string(),
+        };
+        let result = aggregate_lens_votes(&[vote, lens_vote(false)]);
+        assert!(result.contested);
+        assert_eq!(result.reasons, vec!["wrong smell".to_string()]);
+    }
+
     fn finding(severity: Severity) -> SynthFinding {
         SynthFinding {
             file: "a.rs".to_string(),
