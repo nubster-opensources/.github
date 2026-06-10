@@ -17,6 +17,8 @@ const LENSES: [Lens; 3] = [Lens::CodeConfirms, Lens::RealImpact, Lens::FalsePosi
 
 /// Marker used to upsert the single team-review comment on a pull request.
 const MARKER: &str = "<!-- ai-team-bot -->";
+/// Minimum number of lens votes required before a finding may be confirmed.
+const MIN_CONFIRM_VOTES: usize = 2;
 
 /// Runs the full multi-agent team review pipeline for a pull request.
 pub async fn run_team(
@@ -264,22 +266,26 @@ async fn post_confirmed_inline(
     .await
 }
 
-/// Aggregates the lens votes for one finding using a sceptical majority rule:
-/// contested when at least half of the received votes are contested, and when
-/// no lens could be reached at all (an unverified finding is not confirmed).
+/// Aggregates the lens votes for one finding with a strict quorum: a finding
+/// is confirmed only when at least `MIN_CONFIRM_VOTES` lenses responded and none
+/// of them contested it; any contestation or too few votes leaves it contested.
 #[must_use]
 pub fn aggregate_lens_votes(votes: &[LensVerdict]) -> FindingVerdict {
     let total = votes.len();
     let contested_count = votes.iter().filter(|v| v.contested).count();
-    let contested = total == 0 || contested_count * 2 >= total;
-    let reasons = if total == 0 {
-        vec!["verification unavailable (all lenses failed)".to_string()]
-    } else {
+    let contested = total < MIN_CONFIRM_VOTES || contested_count > 0;
+    let reasons = if total < MIN_CONFIRM_VOTES {
+        vec![format!(
+            "insufficient verification ({total} of {MIN_CONFIRM_VOTES} required lenses responded)"
+        )]
+    } else if contested_count > 0 {
         votes
             .iter()
             .filter(|v| v.contested)
             .map(|v| v.reason.clone())
             .collect()
+    } else {
+        Vec::new()
     };
     FindingVerdict { contested, reasons }
 }
@@ -324,29 +330,27 @@ mod tests {
     }
 
     #[test]
-    fn aggregate_three_lens_majority() {
-        assert!(
-            aggregate_lens_votes(&[lens_vote(true), lens_vote(true), lens_vote(false)]).contested
-        );
-        assert!(
-            aggregate_lens_votes(&[lens_vote(true), lens_vote(true), lens_vote(true)]).contested
-        );
-        assert!(
-            !aggregate_lens_votes(&[lens_vote(true), lens_vote(false), lens_vote(false)]).contested
-        );
+    fn aggregate_confirms_only_on_unanimous_present_min_two() {
+        // two or three present, none contested -> confirmed (not contested)
+        assert!(!aggregate_lens_votes(&[lens_vote(false), lens_vote(false)]).contested);
         assert!(
             !aggregate_lens_votes(&[lens_vote(false), lens_vote(false), lens_vote(false)])
                 .contested
         );
+        // any single contestation -> contested
+        assert!(
+            aggregate_lens_votes(&[lens_vote(true), lens_vote(false), lens_vote(false)]).contested
+        );
+        assert!(aggregate_lens_votes(&[lens_vote(true), lens_vote(false)]).contested);
     }
 
     #[test]
-    fn aggregate_handles_abstentions_and_empty() {
+    fn aggregate_contests_when_too_few_lenses_responded() {
         assert!(aggregate_lens_votes(&[]).contested);
-        assert!(aggregate_lens_votes(&[lens_vote(true), lens_vote(false)]).contested);
-        assert!(!aggregate_lens_votes(&[lens_vote(false), lens_vote(false)]).contested);
+        assert!(aggregate_lens_votes(&[lens_vote(false)]).contested); // 1 vote < min 2
         assert!(aggregate_lens_votes(&[lens_vote(true)]).contested);
-        assert!(!aggregate_lens_votes(&[lens_vote(false)]).contested);
+        let v = aggregate_lens_votes(&[lens_vote(false)]);
+        assert!(v.reasons[0].contains("insufficient verification"));
     }
 
     fn finding(severity: Severity) -> SynthFinding {
