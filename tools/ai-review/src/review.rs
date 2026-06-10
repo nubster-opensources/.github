@@ -93,7 +93,7 @@ enum Lang {
     Fr,
 }
 
-/// Static section labels for one language.
+/// Localized section labels for one rendered language block.
 struct Labels {
     summary: &'static str,
     overview: &'static str,
@@ -211,6 +211,7 @@ fn render_lang_block(view: &TeamCommentView, lang: Lang) -> String {
     let strengths = pick_list(view.strengths, view.strengths_fr, lang);
     if !strengths.is_empty() {
         writeln!(md, "**{}**", labels.strengths).unwrap();
+        md.push('\n');
         for s in strengths {
             writeln!(md, "- {s}").unwrap();
         }
@@ -232,6 +233,7 @@ fn render_lang_block(view: &TeamCommentView, lang: Lang) -> String {
 
     if !confirmed_critical.is_empty() {
         writeln!(md, "**{}**", labels.confirmed).unwrap();
+        md.push('\n');
         for (f, _) in &confirmed_critical {
             writeln!(md, "{}", render_finding_line(f, lang)).unwrap();
         }
@@ -254,6 +256,7 @@ fn render_lang_block(view: &TeamCommentView, lang: Lang) -> String {
 
     if !contested.is_empty() {
         writeln!(md, "**{}**", labels.contested).unwrap();
+        md.push('\n');
         for (f, v) in &contested {
             writeln!(md, "{}", render_finding_line(f, lang)).unwrap();
             let reasons = pick_list(&v.reasons, &v.reasons_fr, lang);
@@ -264,7 +267,7 @@ fn render_lang_block(view: &TeamCommentView, lang: Lang) -> String {
         md.push('\n');
     }
 
-    if confirmed_critical.is_empty() && confirmed_minor.is_empty() && contested.is_empty() {
+    if view.scored.is_empty() {
         writeln!(md, "{}\n", labels.nothing).unwrap();
     }
 
@@ -497,5 +500,32 @@ mod tests {
         assert!(md.contains("already handled elsewhere"));
         assert!(md.contains("deja gere ailleurs"));
         assert!(md.contains("Performance"));
+        assert!(md.contains("<details><summary>Minor (1)</summary>\n\n"));
+    }
+
+    #[test]
+    fn renders_nothing_reported_in_both_languages_when_empty() {
+        let scored: Vec<(SynthFinding, FindingVerdict)> = vec![];
+        let ok = [Agent::Correctness];
+        let view = TeamCommentView {
+            executive_summary: "Trivial change.",
+            executive_summary_fr: "Changement trivial.",
+            strengths: &[],
+            strengths_fr: &[],
+            scored: &scored,
+            verdict: Verdict::Ship,
+            file_count: 1,
+            agents_ok: &ok,
+            agents_failed: &[],
+            raw_count: 0,
+            dedup_count: 0,
+            capped: 0,
+            model: "codestral-latest + mistral-large-latest",
+        };
+        let md = render_team_comment(&view);
+        assert!(md.contains("0 confirmed"));
+        assert!(md.contains("No issues reported by the agents."));
+        assert!(md.contains("Aucun problème remonté par les agents."));
+        assert!(md.contains("<details><summary>🇬🇧 English</summary>\n\n"));
     }
 }

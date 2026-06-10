@@ -241,6 +241,8 @@ async fn verify_findings(
 }
 
 /// Posts inline comments for confirmed, critical, line-located findings.
+/// The body shows the French message first and the English message second,
+/// or just the English message when no translation is available.
 async fn post_confirmed_inline(
     clients: &Clients,
     owner: &str,
