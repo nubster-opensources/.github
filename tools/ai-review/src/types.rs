@@ -160,7 +160,6 @@ pub struct SynthFinding {
     pub category: Category,
     pub message: String,
     #[serde(default)]
-    #[allow(dead_code)]
     pub message_fr: String,
     #[serde(default)]
     pub sources: Vec<String>,
@@ -171,12 +170,10 @@ pub struct SynthFinding {
 pub struct SynthReport {
     pub executive_summary: String,
     #[serde(default)]
-    #[allow(dead_code)]
     pub executive_summary_fr: String,
     #[serde(default)]
     pub strengths: Vec<String>,
     #[serde(default)]
-    #[allow(dead_code)]
     pub strengths_fr: Vec<String>,
     #[serde(default)]
     pub findings: Vec<SynthFinding>,
@@ -189,7 +186,6 @@ pub struct LensVerdict {
     pub contested: bool,
     pub reason: String,
     #[serde(default)]
-    #[allow(dead_code)]
     pub reason_fr: String,
 }
 
@@ -198,7 +194,6 @@ pub struct LensVerdict {
 pub struct FindingVerdict {
     pub contested: bool,
     pub reasons: Vec<String>,
-    #[allow(dead_code)]
     pub reasons_fr: Vec<String>,
 }
 

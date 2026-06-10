@@ -451,7 +451,7 @@ fn synthesis_system_prompt() -> String {
 7. Categorise: tag each finding with a "category" from ["bug","security","design","performance","test-gap"].
 8. Surface disagreement: if two agents contradict each other on the same point, state that explicitly in the message instead of silently choosing a side.
 9. Summarise: write a 3-5 sentence executive summary of what the PR does and its overall quality, and list concrete strengths. Provide BOTH an English version and a French version of every human-readable string.
-10. Do NOT emit a verdict or recommendation — that is computed deterministically downstream.
+10. Do NOT emit a verdict or recommendation - that is computed deterministically downstream.
 
 Respond ONLY with a valid JSON object:
 {

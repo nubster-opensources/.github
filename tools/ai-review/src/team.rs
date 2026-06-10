@@ -78,7 +78,9 @@ pub async fn run_team(
     );
     let view = review::TeamCommentView {
         executive_summary: &synth.executive_summary,
+        executive_summary_fr: &synth.executive_summary_fr,
         strengths: &synth.strengths,
+        strengths_fr: &synth.strengths_fr,
         scored: &scored,
         verdict,
         file_count: ctx.file_count,
@@ -253,7 +255,11 @@ async fn post_confirmed_inline(
         .map(|(f, _)| github::InlineComment {
             path: f.file.clone(),
             line: f.line,
-            body: f.message.clone(),
+            body: if f.message_fr.is_empty() {
+                f.message.clone()
+            } else {
+                format!("{}\n\n{}", f.message_fr, f.message)
+            },
         })
         .collect();
 
