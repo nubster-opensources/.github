@@ -421,6 +421,7 @@ mod tests {
         github::DiffContext {
             full: format!("--- {file}\n{patch}\n"),
             by_file,
+            head_files: std::collections::HashMap::new(),
             file_count: 1,
         }
     }

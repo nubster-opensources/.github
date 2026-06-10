@@ -20,10 +20,16 @@ pub struct InlineComment {
 /// finding has no per-file patch (file-level or cross-file findings).
 const PATCH_FALLBACK_CHARS: usize = 8_000;
 
+/// Number of head-file lines shown on each side of a finding's line to a lens.
+#[allow(dead_code)]
+const LENS_WINDOW_LINES: u32 = 40;
+
 /// The PR diff in two shapes: a concatenated view and a per-file patch map.
 pub struct DiffContext {
     pub full: String,
     pub by_file: HashMap<String, String>,
+    #[allow(dead_code)]
+    pub head_files: HashMap<String, String>,
     pub file_count: usize,
 }
 
@@ -36,6 +42,27 @@ impl DiffContext {
             Some(patch) if !patch.is_empty() => patch.as_str(),
             _ => safe_truncate(&self.full, PATCH_FALLBACK_CHARS),
         }
+    }
+
+    /// Returns the context handed to a lens for `finding`: the file patch plus,
+    /// when the head file is available and the finding is line-located, a
+    /// numbered window of the real file around that line. Falls back to the
+    /// patch alone for file-level findings or files without head content.
+    #[must_use]
+    #[allow(dead_code)]
+    pub fn lens_context(&self, finding: &SynthFinding) -> String {
+        let patch = self.patch_for(finding).to_string();
+        if finding.line == 0 {
+            return patch;
+        }
+        let Some(head) = self.head_files.get(&finding.file) else {
+            return patch;
+        };
+        let window = head_window(head, finding.line, LENS_WINDOW_LINES);
+        if window.is_empty() {
+            return patch;
+        }
+        format!("{patch}\n\nFull-file context around the finding (head):\n{window}")
     }
 
     /// Reports whether the finding's line falls inside a hunk of its file
@@ -96,6 +123,25 @@ fn parse_hunk_header(line: &str) -> Option<(u32, u32)> {
     }
 }
 
+/// Returns the lines of `content` within `radius` of `line` (1-based), each
+/// prefixed by its line number, joined by newlines. Empty when out of range.
+#[allow(dead_code)]
+fn head_window(content: &str, line: u32, radius: u32) -> String {
+    let line = usize::try_from(line).unwrap_or(usize::MAX);
+    let radius = usize::try_from(radius).unwrap_or(usize::MAX);
+    let start = line.saturating_sub(radius).max(1);
+    let end = line.saturating_add(radius);
+    content
+        .lines()
+        .enumerate()
+        .filter_map(|(idx, text)| {
+            let number = idx + 1;
+            (number >= start && number <= end).then(|| format!("{number:>5} {text}"))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Truncates `s` to at most `max` bytes without splitting a UTF-8 sequence.
 fn safe_truncate(s: &str, max: usize) -> &str {
     if s.len() <= max {
@@ -137,6 +183,7 @@ pub async fn fetch_diff_context(
     Ok(DiffContext {
         full,
         by_file,
+        head_files: HashMap::new(),
         file_count,
     })
 }
@@ -336,6 +383,7 @@ mod tests {
         DiffContext {
             full: format!("--- {file}\n{patch}\n"),
             by_file,
+            head_files: HashMap::new(),
             file_count: 1,
         }
     }
@@ -366,6 +414,52 @@ mod tests {
         assert_eq!(hunks.len(), 2);
         assert_eq!((hunks[0].new_start, hunks[0].new_count), (1, 5));
         assert_eq!((hunks[1].new_start, hunks[1].new_count), (11, 4));
+    }
+
+    const HEAD_FILE: &str = "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8";
+
+    #[test]
+    fn head_window_returns_numbered_lines_around_target() {
+        let window = head_window(HEAD_FILE, 4, 2);
+        assert!(window.contains("    2 line2"));
+        assert!(window.contains("    6 line6"));
+        assert!(!window.contains("line1"));
+        assert!(!window.contains("line7"));
+    }
+
+    #[test]
+    fn head_window_clamps_at_file_bounds() {
+        let window = head_window(HEAD_FILE, 1, 2);
+        assert!(window.contains("    1 line1"));
+        assert!(window.contains("    3 line3"));
+        assert!(!window.contains("line4"));
+    }
+
+    #[test]
+    fn lens_context_appends_head_window_when_available() {
+        let mut ctx = ctx_with("a.rs", "@@ -1,2 +1,3 @@\n+changed");
+        ctx.head_files
+            .insert("a.rs".to_string(), HEAD_FILE.to_string());
+        let out = ctx.lens_context(&finding_at("a.rs", 4));
+        assert!(out.contains("+changed"));
+        assert!(out.contains("Full-file context"));
+        assert!(out.contains("line4"));
+    }
+
+    #[test]
+    fn lens_context_falls_back_to_patch_without_head_or_line() {
+        let ctx = ctx_with("a.rs", "@@ -1,2 +1,3 @@\n+changed");
+        assert_eq!(
+            ctx.lens_context(&finding_at("a.rs", 4)),
+            ctx.patch_for(&finding_at("a.rs", 4))
+        );
+        let mut ctx2 = ctx_with("a.rs", "@@ -1,2 +1,3 @@\n+changed");
+        ctx2.head_files
+            .insert("a.rs".to_string(), HEAD_FILE.to_string());
+        assert_eq!(
+            ctx2.lens_context(&finding_at("a.rs", 0)),
+            ctx2.patch_for(&finding_at("a.rs", 0))
+        );
     }
 
     #[test]
