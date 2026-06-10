@@ -475,4 +475,14 @@ mod tests {
         assert_eq!(ctx.line_in_patch(&finding_at("src/lib.rs", 0)), None);
         assert_eq!(ctx.line_in_patch(&finding_at("unknown.rs", 3)), None);
     }
+
+    #[test]
+    fn lens_context_falls_back_when_line_beyond_eof() {
+        assert_eq!(head_window(HEAD_FILE, 1000, 40), "");
+        let mut ctx = ctx_with("a.rs", "@@ -1,2 +1,3 @@\n+changed");
+        ctx.head_files
+            .insert("a.rs".to_string(), HEAD_FILE.to_string());
+        let finding = finding_at("a.rs", 1000);
+        assert_eq!(ctx.lens_context(&finding), ctx.patch_for(&finding));
+    }
 }
