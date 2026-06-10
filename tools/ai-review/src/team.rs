@@ -17,6 +17,8 @@ const LENSES: [Lens; 3] = [Lens::CodeConfirms, Lens::RealImpact, Lens::FalsePosi
 
 /// Marker used to upsert the single team-review comment on a pull request.
 const MARKER: &str = "<!-- ai-team-bot -->";
+/// Minimum number of lens votes required before a finding may be confirmed.
+const MIN_CONFIRM_VOTES: usize = 2;
 
 /// Runs the full multi-agent team review pipeline for a pull request.
 pub async fn run_team(
@@ -26,7 +28,7 @@ pub async fn run_team(
     pr_number: u64,
 ) -> anyhow::Result<()> {
     println!("Fetching PR #{pr_number} diff for team review…");
-    let ctx = github::fetch_diff_context(&clients.octo, owner, repo, pr_number).await?;
+    let mut ctx = github::fetch_diff_context(&clients.octo, owner, repo, pr_number).await?;
     if ctx.full.trim().is_empty() {
         println!("Empty diff — nothing to review.");
         return Ok(());
@@ -57,6 +59,9 @@ pub async fn run_team(
         );
         findings.truncate(MAX_VERIFIED_FINDINGS);
     }
+
+    let head_sha = github::fetch_head_sha(&clients.octo, owner, repo, pr_number).await?;
+    github::populate_head_files(&clients.octo, owner, repo, &head_sha, &findings, &mut ctx).await;
 
     println!(
         "Verifying {} finding(s) with the 3-lens vote…",
@@ -89,7 +94,7 @@ pub async fn run_team(
     println!("Upserting team comment…");
     github::upsert_global_comment(&clients.octo, owner, repo, pr_number, &body, MARKER).await?;
 
-    post_confirmed_inline(clients, owner, repo, pr_number, &scored).await?;
+    post_confirmed_inline(clients, owner, repo, pr_number, &head_sha, &scored).await?;
 
     println!("Team review complete.");
     Ok(())
@@ -192,7 +197,7 @@ async fn verify_findings(
         if prefilled[idx].is_some() {
             continue;
         }
-        let patch = ctx.patch_for(finding).to_owned();
+        let patch = ctx.lens_context(finding);
         for lens in LENSES {
             let permit_source = Arc::clone(&semaphore);
             let client = clients.http.clone();
@@ -235,6 +240,7 @@ async fn post_confirmed_inline(
     owner: &str,
     repo: &str,
     pr_number: u64,
+    head_sha: &str,
     scored: &[(SynthFinding, FindingVerdict)],
 ) -> anyhow::Result<()> {
     let inline: Vec<github::InlineComment> = scored
@@ -251,35 +257,38 @@ async fn post_confirmed_inline(
         return Ok(());
     }
 
-    let head_sha = github::fetch_head_sha(&clients.octo, owner, repo, pr_number).await?;
     println!("Posting {} confirmed inline comment(s)…", inline.len());
     github::post_inline_comments(
         &clients.github_token,
         owner,
         repo,
         pr_number,
-        &head_sha,
+        head_sha,
         &inline,
     )
     .await
 }
 
-/// Aggregates the lens votes for one finding using a sceptical majority rule:
-/// contested when at least half of the received votes are contested, and when
-/// no lens could be reached at all (an unverified finding is not confirmed).
+/// Aggregates the lens votes for one finding with a strict quorum: a finding
+/// is confirmed only when at least `MIN_CONFIRM_VOTES` lenses responded and none
+/// of them contested it; any contestation or too few votes leaves it contested.
 #[must_use]
 pub fn aggregate_lens_votes(votes: &[LensVerdict]) -> FindingVerdict {
     let total = votes.len();
     let contested_count = votes.iter().filter(|v| v.contested).count();
-    let contested = total == 0 || contested_count * 2 >= total;
-    let reasons = if total == 0 {
-        vec!["verification unavailable (all lenses failed)".to_string()]
-    } else {
+    let contested = total < MIN_CONFIRM_VOTES || contested_count > 0;
+    let reasons = if total < MIN_CONFIRM_VOTES {
+        vec![format!(
+            "insufficient verification ({total} of {MIN_CONFIRM_VOTES} required lenses responded)"
+        )]
+    } else if contested_count > 0 {
         votes
             .iter()
             .filter(|v| v.contested)
             .map(|v| v.reason.clone())
             .collect()
+    } else {
+        Vec::new()
     };
     FindingVerdict { contested, reasons }
 }
@@ -324,29 +333,38 @@ mod tests {
     }
 
     #[test]
-    fn aggregate_three_lens_majority() {
-        assert!(
-            aggregate_lens_votes(&[lens_vote(true), lens_vote(true), lens_vote(false)]).contested
-        );
-        assert!(
-            aggregate_lens_votes(&[lens_vote(true), lens_vote(true), lens_vote(true)]).contested
-        );
-        assert!(
-            !aggregate_lens_votes(&[lens_vote(true), lens_vote(false), lens_vote(false)]).contested
-        );
+    fn aggregate_confirms_only_on_unanimous_present_min_two() {
+        // two or three present, none contested -> confirmed (not contested)
+        assert!(!aggregate_lens_votes(&[lens_vote(false), lens_vote(false)]).contested);
         assert!(
             !aggregate_lens_votes(&[lens_vote(false), lens_vote(false), lens_vote(false)])
                 .contested
         );
+        // any single contestation -> contested
+        assert!(
+            aggregate_lens_votes(&[lens_vote(true), lens_vote(false), lens_vote(false)]).contested
+        );
+        assert!(aggregate_lens_votes(&[lens_vote(true), lens_vote(false)]).contested);
     }
 
     #[test]
-    fn aggregate_handles_abstentions_and_empty() {
+    fn aggregate_contests_when_too_few_lenses_responded() {
         assert!(aggregate_lens_votes(&[]).contested);
-        assert!(aggregate_lens_votes(&[lens_vote(true), lens_vote(false)]).contested);
-        assert!(!aggregate_lens_votes(&[lens_vote(false), lens_vote(false)]).contested);
+        assert!(aggregate_lens_votes(&[lens_vote(false)]).contested); // 1 vote < min 2
         assert!(aggregate_lens_votes(&[lens_vote(true)]).contested);
-        assert!(!aggregate_lens_votes(&[lens_vote(false)]).contested);
+        let v = aggregate_lens_votes(&[lens_vote(false)]);
+        assert!(v.reasons[0].contains("insufficient verification"));
+    }
+
+    #[test]
+    fn aggregate_propagates_contested_reasons() {
+        let vote = LensVerdict {
+            contested: true,
+            reason: "wrong smell".to_string(),
+        };
+        let result = aggregate_lens_votes(&[vote, lens_vote(false)]);
+        assert!(result.contested);
+        assert_eq!(result.reasons, vec!["wrong smell".to_string()]);
     }
 
     fn finding(severity: Severity) -> SynthFinding {
@@ -406,6 +424,7 @@ mod tests {
         github::DiffContext {
             full: format!("--- {file}\n{patch}\n"),
             by_file,
+            head_files: std::collections::HashMap::new(),
             file_count: 1,
         }
     }
