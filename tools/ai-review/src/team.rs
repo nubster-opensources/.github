@@ -38,7 +38,7 @@ pub async fn run_team(
     let (report_ok, agents_ok, agents_failed) = run_agents(clients, &ctx.full).await;
     if report_ok.is_empty() {
         let body = format!(
-            "{MARKER}\n## Team Review IA\n\n⚠️ Team review unavailable: all specialist agents failed."
+            "{MARKER}\n## Team Review\n\n⚠️ Team review unavailable: all specialist agents failed."
         );
         github::upsert_global_comment(&clients.octo, owner, repo, pr_number, &body, MARKER).await?;
         return Ok(());
