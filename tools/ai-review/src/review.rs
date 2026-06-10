@@ -309,11 +309,13 @@ mod tests {
                     severity: Severity::Critical,
                     category: Category::Bug,
                     message: "panic in handler".to_string(),
+                    message_fr: "panique dans le handler".to_string(),
                     sources: vec!["correctness".to_string()],
                 },
                 FindingVerdict {
                     contested: false,
                     reasons: vec![],
+                    reasons_fr: vec![],
                 },
             ),
             (
@@ -323,11 +325,13 @@ mod tests {
                     severity: Severity::Minor,
                     category: Category::Design,
                     message: "tight coupling".to_string(),
+                    message_fr: "couplage fort".to_string(),
                     sources: vec![],
                 },
                 FindingVerdict {
                     contested: true,
                     reasons: vec!["already handled elsewhere".to_string()],
+                    reasons_fr: vec!["deja gere ailleurs".to_string()],
                 },
             ),
         ];

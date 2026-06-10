@@ -424,6 +424,7 @@ mod tests {
             severity: Severity::Minor,
             category: Category::Bug,
             message: "m".to_string(),
+            message_fr: "m".to_string(),
             sources: vec![],
         }
     }

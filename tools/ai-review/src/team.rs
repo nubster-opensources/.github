@@ -168,6 +168,10 @@ fn prefilter_verdict(ctx: &github::DiffContext, finding: &SynthFinding) -> Optio
                 "deterministic check: line {} of {} is not part of this pull request's changes",
                 finding.line, finding.file
             )],
+            reasons_fr: vec![format!(
+                "controle deterministe : la ligne {} de {} ne fait pas partie des changements de cette pull request",
+                finding.line, finding.file
+            )],
         });
     }
     None
@@ -277,20 +281,41 @@ pub fn aggregate_lens_votes(votes: &[LensVerdict]) -> FindingVerdict {
     let total = votes.len();
     let contested_count = votes.iter().filter(|v| v.contested).count();
     let contested = total < MIN_CONFIRM_VOTES || contested_count > 0;
-    let reasons = if total < MIN_CONFIRM_VOTES {
-        vec![format!(
-            "insufficient verification ({total} of {MIN_CONFIRM_VOTES} required lenses responded)"
-        )]
+    let (reasons, reasons_fr) = if total < MIN_CONFIRM_VOTES {
+        (
+            vec![format!(
+                "insufficient verification ({total} of {MIN_CONFIRM_VOTES} required lenses responded)"
+            )],
+            vec![format!(
+                "verification insuffisante ({total} lentille(s) sur {MIN_CONFIRM_VOTES} requises)"
+            )],
+        )
     } else if contested_count > 0 {
-        votes
+        let reasons = votes
             .iter()
             .filter(|v| v.contested)
             .map(|v| v.reason.clone())
-            .collect()
+            .collect();
+        let reasons_fr = votes
+            .iter()
+            .filter(|v| v.contested)
+            .map(|v| {
+                if v.reason_fr.is_empty() {
+                    v.reason.clone()
+                } else {
+                    v.reason_fr.clone()
+                }
+            })
+            .collect();
+        (reasons, reasons_fr)
     } else {
-        Vec::new()
+        (Vec::new(), Vec::new())
     };
-    FindingVerdict { contested, reasons }
+    FindingVerdict {
+        contested,
+        reasons,
+        reasons_fr,
+    }
 }
 
 /// Computes the overall verdict deterministically: a confirmed critical blocks,
@@ -329,6 +354,7 @@ mod tests {
         LensVerdict {
             contested,
             reason: "because".to_string(),
+            reason_fr: "parce que".to_string(),
         }
     }
 
@@ -361,6 +387,7 @@ mod tests {
         let vote = LensVerdict {
             contested: true,
             reason: "wrong smell".to_string(),
+            reason_fr: "mauvaise odeur".to_string(),
         };
         let result = aggregate_lens_votes(&[vote, lens_vote(false)]);
         assert!(result.contested);
@@ -374,6 +401,7 @@ mod tests {
             severity,
             category: Category::Bug,
             message: "m".to_string(),
+            message_fr: "m".to_string(),
             sources: vec![],
         }
     }
@@ -382,6 +410,7 @@ mod tests {
         FindingVerdict {
             contested,
             reasons: vec![],
+            reasons_fr: vec![],
         }
     }
 
@@ -414,6 +443,7 @@ mod tests {
             severity: Severity::Minor,
             category: Category::Bug,
             message: "m".to_string(),
+            message_fr: "m".to_string(),
             sources: vec![],
         }
     }
