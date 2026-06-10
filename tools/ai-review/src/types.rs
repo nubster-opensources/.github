@@ -160,6 +160,8 @@ pub struct SynthFinding {
     pub category: Category,
     pub message: String,
     #[serde(default)]
+    pub message_fr: String,
+    #[serde(default)]
     pub sources: Vec<String>,
 }
 
@@ -168,7 +170,11 @@ pub struct SynthFinding {
 pub struct SynthReport {
     pub executive_summary: String,
     #[serde(default)]
+    pub executive_summary_fr: String,
+    #[serde(default)]
     pub strengths: Vec<String>,
+    #[serde(default)]
+    pub strengths_fr: Vec<String>,
     #[serde(default)]
     pub findings: Vec<SynthFinding>,
 }
@@ -179,6 +185,8 @@ pub struct LensVerdict {
     #[serde(deserialize_with = "de_bool_loose")]
     pub contested: bool,
     pub reason: String,
+    #[serde(default)]
+    pub reason_fr: String,
 }
 
 /// Aggregated verdict for one finding after the multi-lens vote.
@@ -186,6 +194,7 @@ pub struct LensVerdict {
 pub struct FindingVerdict {
     pub contested: bool,
     pub reasons: Vec<String>,
+    pub reasons_fr: Vec<String>,
 }
 
 /// Final overall verdict computed deterministically after verification.
@@ -318,6 +327,41 @@ mod tests {
                 .unwrap()
                 .category,
             Category::Other
+        );
+    }
+
+    #[test]
+    fn synth_finding_reads_french_and_defaults_it() {
+        let with = r#"{"file":"a.rs","message":"Panic.","message_fr":"Panique."}"#;
+        assert_eq!(
+            serde_json::from_str::<SynthFinding>(with)
+                .unwrap()
+                .message_fr,
+            "Panique."
+        );
+        let without = r#"{"file":"a.rs","message":"Panic."}"#;
+        assert_eq!(
+            serde_json::from_str::<SynthFinding>(without)
+                .unwrap()
+                .message_fr,
+            ""
+        );
+    }
+
+    #[test]
+    fn synth_report_defaults_french_fields() {
+        let json = r#"{"executive_summary":"Solid."}"#;
+        let r: SynthReport = serde_json::from_str(json).unwrap();
+        assert_eq!(r.executive_summary_fr, "");
+        assert!(r.strengths_fr.is_empty());
+    }
+
+    #[test]
+    fn lens_verdict_defaults_french_reason() {
+        let json = r#"{"contested": true, "reason": "x"}"#;
+        assert_eq!(
+            serde_json::from_str::<LensVerdict>(json).unwrap().reason_fr,
+            ""
         );
     }
 

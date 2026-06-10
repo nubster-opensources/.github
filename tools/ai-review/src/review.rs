@@ -72,7 +72,9 @@ pub fn has_bot_marker(body: &str, marker: &str) -> bool {
 /// Input bundle for [`render_team_comment`], grouped to keep the argument count low.
 pub struct TeamCommentView<'a> {
     pub executive_summary: &'a str,
+    pub executive_summary_fr: &'a str,
     pub strengths: &'a [String],
+    pub strengths_fr: &'a [String],
     pub scored: &'a [(SynthFinding, FindingVerdict)],
     pub verdict: Verdict,
     pub file_count: usize,
@@ -84,76 +86,107 @@ pub struct TeamCommentView<'a> {
     pub model: &'a str,
 }
 
+/// Language of a rendered report block.
+#[derive(Clone, Copy)]
+enum Lang {
+    En,
+    Fr,
+}
+
+/// Localized section labels for one rendered language block.
+struct Labels {
+    summary: &'static str,
+    overview: &'static str,
+    strengths: &'static str,
+    confirmed: &'static str,
+    minor: &'static str,
+    contested: &'static str,
+    nothing: &'static str,
+}
+
+impl Labels {
+    fn for_lang(lang: Lang) -> Self {
+        match lang {
+            Lang::En => Labels {
+                summary: "🇬🇧 English",
+                overview: "Overview",
+                strengths: "Strengths",
+                confirmed: "Confirmed findings",
+                minor: "Minor",
+                contested: "⚠️ Contested (adversarial verification)",
+                nothing: "No issues reported by the agents.",
+            },
+            Lang::Fr => Labels {
+                summary: "🇫🇷 Français",
+                overview: "Vue d'ensemble",
+                strengths: "Points forts",
+                confirmed: "Findings confirmés",
+                minor: "Mineurs",
+                contested: "⚠️ Contestés (vérification adversariale)",
+                nothing: "Aucun problème remonté par les agents.",
+            },
+        }
+    }
+}
+
+/// Picks the English text, or the French text when present (English fallback).
+fn pick<'a>(en: &'a str, fr: &'a str, lang: Lang) -> &'a str {
+    match lang {
+        Lang::Fr if !fr.is_empty() => fr,
+        Lang::En | Lang::Fr => en,
+    }
+}
+
+/// Picks the English list, or the French list when non-empty (English fallback).
+fn pick_list<'a>(en: &'a [String], fr: &'a [String], lang: Lang) -> &'a [String] {
+    match lang {
+        Lang::Fr if !fr.is_empty() => fr,
+        Lang::En | Lang::Fr => en,
+    }
+}
+
 /// Renders the team-mode global comment (with hidden upsert marker).
 #[must_use]
 pub fn render_team_comment(view: &TeamCommentView) -> String {
-    let mut md = "<!-- ai-team-bot -->\n## Team Review IA\n\n".to_string();
-
-    let verdict_line = match view.verdict {
-        Verdict::Ship => "**Verdict : SHIP ✅**",
-        Verdict::NeedsWork => "**Verdict : NEEDS_WORK ⚠️**",
-        Verdict::Discuss => "**Verdict : DISCUSS 💬**",
+    let confirmed_count = view.scored.iter().filter(|(_, v)| !v.contested).count();
+    let contested_count = view.scored.iter().filter(|(_, v)| v.contested).count();
+    let verdict_badge = match view.verdict {
+        Verdict::Ship => "SHIP ✅",
+        Verdict::NeedsWork => "NEEDS_WORK ⚠️",
+        Verdict::Discuss => "DISCUSS 💬",
     };
-    writeln!(md, "{verdict_line}\n").unwrap();
-    writeln!(md, "### Vue d'ensemble\n{}\n", view.executive_summary).unwrap();
 
-    if !view.strengths.is_empty() {
-        md.push_str("### Points forts\n");
-        for s in view.strengths {
-            writeln!(md, "- {s}").unwrap();
-        }
-        md.push('\n');
-    }
+    let mut md = "<!-- ai-team-bot -->\n## Team Review\n\n".to_string();
+    writeln!(
+        md,
+        "**Verdict : {verdict_badge}** · {confirmed_count} confirmed · {contested_count} contested\n"
+    )
+    .unwrap();
 
-    let confirmed: Vec<&(SynthFinding, FindingVerdict)> =
-        view.scored.iter().filter(|(_, v)| !v.contested).collect();
-    let contested: Vec<&(SynthFinding, FindingVerdict)> =
-        view.scored.iter().filter(|(_, v)| v.contested).collect();
-
-    if !confirmed.is_empty() {
-        md.push_str("### Findings confirmés\n");
-        for (f, _) in &confirmed {
-            writeln!(md, "{}", render_finding_line(f)).unwrap();
-        }
-        md.push('\n');
-    }
-
-    if !contested.is_empty() {
-        md.push_str("### ⚠️ Contestés (vérification adversariale)\n");
-        for (f, v) in &contested {
-            writeln!(md, "{}", render_finding_line(f)).unwrap();
-            if let Some(reason) = v.reasons.first() {
-                writeln!(md, "  - _{reason}_").unwrap();
-            }
-        }
-        md.push('\n');
-    }
-
-    if confirmed.is_empty() && contested.is_empty() {
-        md.push_str("Aucun problème remonté par les agents.\n\n");
-    }
+    md.push_str(&render_lang_block(view, Lang::En));
+    md.push_str(&render_lang_block(view, Lang::Fr));
 
     md.push_str("---\n");
     let ok_labels: Vec<&str> = view.agents_ok.iter().map(|a| a.label()).collect();
     write!(md, "*Agents : {}", ok_labels.join(", ")).unwrap();
     if !view.agents_failed.is_empty() {
         let failed_labels: Vec<&str> = view.agents_failed.iter().map(|a| a.label()).collect();
-        write!(md, " · échoués : {}", failed_labels.join(", ")).unwrap();
+        write!(md, " · failed : {}", failed_labels.join(", ")).unwrap();
     }
     writeln!(md).unwrap();
     write!(
         md,
-        "Findings : {} bruts → {} après fusion",
+        "Findings : {} raw -> {} merged",
         view.raw_count, view.dedup_count
     )
     .unwrap();
     if view.capped > 0 {
-        write!(md, " → {} non vérifiés (plafond)", view.capped).unwrap();
+        write!(md, " -> {} unverified (cap)", view.capped).unwrap();
     }
     writeln!(md).unwrap();
     write!(
         md,
-        "Modèle : {} · Diff : {} fichier(s)*",
+        "Model : {} · Diff : {} file(s)*",
         view.model, view.file_count
     )
     .unwrap();
@@ -161,7 +194,88 @@ pub fn render_team_comment(view: &TeamCommentView) -> String {
     md
 }
 
-fn render_finding_line(f: &SynthFinding) -> String {
+/// Renders one language block as a `<details>` section (French opens by default).
+fn render_lang_block(view: &TeamCommentView, lang: Lang) -> String {
+    let labels = Labels::for_lang(lang);
+    let open = if matches!(lang, Lang::Fr) {
+        " open"
+    } else {
+        ""
+    };
+    let mut md = String::new();
+    writeln!(md, "<details{open}><summary>{}</summary>\n", labels.summary).unwrap();
+
+    let summary = pick(view.executive_summary, view.executive_summary_fr, lang);
+    writeln!(md, "**{}**\n{summary}\n", labels.overview).unwrap();
+
+    let strengths = pick_list(view.strengths, view.strengths_fr, lang);
+    if !strengths.is_empty() {
+        writeln!(md, "**{}**", labels.strengths).unwrap();
+        md.push('\n');
+        for s in strengths {
+            writeln!(md, "- {s}").unwrap();
+        }
+        md.push('\n');
+    }
+
+    let confirmed_critical: Vec<&(SynthFinding, FindingVerdict)> = view
+        .scored
+        .iter()
+        .filter(|(f, v)| !v.contested && f.severity == Severity::Critical)
+        .collect();
+    let confirmed_minor: Vec<&(SynthFinding, FindingVerdict)> = view
+        .scored
+        .iter()
+        .filter(|(f, v)| !v.contested && f.severity == Severity::Minor)
+        .collect();
+    let contested: Vec<&(SynthFinding, FindingVerdict)> =
+        view.scored.iter().filter(|(_, v)| v.contested).collect();
+
+    if !confirmed_critical.is_empty() {
+        writeln!(md, "**{}**", labels.confirmed).unwrap();
+        md.push('\n');
+        for (f, _) in &confirmed_critical {
+            writeln!(md, "{}", render_finding_line(f, lang)).unwrap();
+        }
+        md.push('\n');
+    }
+
+    if !confirmed_minor.is_empty() {
+        writeln!(
+            md,
+            "<details><summary>{} ({})</summary>\n",
+            labels.minor,
+            confirmed_minor.len()
+        )
+        .unwrap();
+        for (f, _) in &confirmed_minor {
+            writeln!(md, "{}", render_finding_line(f, lang)).unwrap();
+        }
+        md.push_str("\n</details>\n\n");
+    }
+
+    if !contested.is_empty() {
+        writeln!(md, "**{}**", labels.contested).unwrap();
+        md.push('\n');
+        for (f, v) in &contested {
+            writeln!(md, "{}", render_finding_line(f, lang)).unwrap();
+            let reasons = pick_list(&v.reasons, &v.reasons_fr, lang);
+            if let Some(reason) = reasons.first() {
+                writeln!(md, "  - _{reason}_").unwrap();
+            }
+        }
+        md.push('\n');
+    }
+
+    if view.scored.is_empty() {
+        writeln!(md, "{}\n", labels.nothing).unwrap();
+    }
+
+    md.push_str("</details>\n\n");
+    md
+}
+
+fn render_finding_line(f: &SynthFinding, lang: Lang) -> String {
     let sev = match f.severity {
         Severity::Critical => "🔴",
         Severity::Minor => "🟡",
@@ -176,12 +290,11 @@ fn render_finding_line(f: &SynthFinding) -> String {
     } else {
         format!(" _(via {})_", f.sources.join(", "))
     };
+    let message = pick(&f.message, &f.message_fr, lang);
     format!(
-        "- {sev} `{}` **{}** : {}{}",
+        "- {sev} `{}` **{}** : {message}{sources}",
         f.category.label(),
-        location,
-        f.message,
-        sources
+        location
     )
 }
 
@@ -298,7 +411,7 @@ mod tests {
     }
 
     #[test]
-    fn renders_team_comment_with_verdict_and_sections() {
+    fn renders_bilingual_team_comment_with_collapsed_minors() {
         use crate::types::Category;
 
         let scored = vec![
@@ -309,41 +422,64 @@ mod tests {
                     severity: Severity::Critical,
                     category: Category::Bug,
                     message: "panic in handler".to_string(),
+                    message_fr: "panique dans le handler".to_string(),
                     sources: vec!["correctness".to_string()],
                 },
                 FindingVerdict {
                     contested: false,
                     reasons: vec![],
+                    reasons_fr: vec![],
                 },
             ),
             (
                 SynthFinding {
                     file: "b.rs".to_string(),
-                    line: 0,
+                    line: 3,
                     severity: Severity::Minor,
                     category: Category::Design,
                     message: "tight coupling".to_string(),
+                    message_fr: "couplage fort".to_string(),
+                    sources: vec![],
+                },
+                FindingVerdict {
+                    contested: false,
+                    reasons: vec![],
+                    reasons_fr: vec![],
+                },
+            ),
+            (
+                SynthFinding {
+                    file: "c.rs".to_string(),
+                    line: 0,
+                    severity: Severity::Minor,
+                    category: Category::Design,
+                    message: "naming".to_string(),
+                    message_fr: "nommage".to_string(),
                     sources: vec![],
                 },
                 FindingVerdict {
                     contested: true,
                     reasons: vec!["already handled elsewhere".to_string()],
+                    reasons_fr: vec!["deja gere ailleurs".to_string()],
                 },
             ),
         ];
         let ok = [Agent::Correctness, Agent::Security];
         let failed = [Agent::Performance];
         let strengths = ["clear separation".to_string()];
+        let strengths_fr = ["separation claire".to_string()];
         let view = TeamCommentView {
             executive_summary: "Adds the handler.",
+            executive_summary_fr: "Ajoute le handler.",
             strengths: &strengths,
+            strengths_fr: &strengths_fr,
             scored: &scored,
             verdict: Verdict::NeedsWork,
             file_count: 3,
             agents_ok: &ok,
             agents_failed: &failed,
             raw_count: 5,
-            dedup_count: 2,
+            dedup_count: 3,
             capped: 0,
             model: "codestral-latest + mistral-large-latest",
         };
@@ -351,11 +487,45 @@ mod tests {
 
         assert!(md.starts_with("<!-- ai-team-bot -->"));
         assert!(md.contains("NEEDS_WORK"));
-        assert!(md.contains("Findings confirmés"));
+        assert!(md.contains("2 confirmed"));
+        assert!(md.contains("1 contested"));
+        assert!(md.contains("<details><summary>🇬🇧 English</summary>"));
+        assert!(md.contains("<details open><summary>🇫🇷 Français</summary>"));
         assert!(md.contains("panic in handler"));
-        assert!(md.contains("Contestés"));
+        assert!(md.contains("panique dans le handler"));
+        assert!(md.contains("Minor (1)"));
+        assert!(md.contains("Mineurs (1)"));
+        assert!(md.contains("tight coupling"));
+        assert!(md.contains("couplage fort"));
         assert!(md.contains("already handled elsewhere"));
-        assert!(md.contains("échoués : Performance"));
-        assert!(md.contains("5 bruts → 2 après fusion"));
+        assert!(md.contains("deja gere ailleurs"));
+        assert!(md.contains("Performance"));
+        assert!(md.contains("<details><summary>Minor (1)</summary>\n\n"));
+    }
+
+    #[test]
+    fn renders_nothing_reported_in_both_languages_when_empty() {
+        let scored: Vec<(SynthFinding, FindingVerdict)> = vec![];
+        let ok = [Agent::Correctness];
+        let view = TeamCommentView {
+            executive_summary: "Trivial change.",
+            executive_summary_fr: "Changement trivial.",
+            strengths: &[],
+            strengths_fr: &[],
+            scored: &scored,
+            verdict: Verdict::Ship,
+            file_count: 1,
+            agents_ok: &ok,
+            agents_failed: &[],
+            raw_count: 0,
+            dedup_count: 0,
+            capped: 0,
+            model: "codestral-latest + mistral-large-latest",
+        };
+        let md = render_team_comment(&view);
+        assert!(md.contains("0 confirmed"));
+        assert!(md.contains("No issues reported by the agents."));
+        assert!(md.contains("Aucun problème remonté par les agents."));
+        assert!(md.contains("<details><summary>🇬🇧 English</summary>\n\n"));
     }
 }
