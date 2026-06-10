@@ -21,14 +21,12 @@ pub struct InlineComment {
 const PATCH_FALLBACK_CHARS: usize = 8_000;
 
 /// Number of head-file lines shown on each side of a finding's line to a lens.
-#[allow(dead_code)]
 const LENS_WINDOW_LINES: u32 = 40;
 
 /// The PR diff in two shapes: a concatenated view and a per-file patch map.
 pub struct DiffContext {
     pub full: String,
     pub by_file: HashMap<String, String>,
-    #[allow(dead_code)]
     pub head_files: HashMap<String, String>,
     pub file_count: usize,
 }
@@ -49,7 +47,6 @@ impl DiffContext {
     /// numbered window of the real file around that line. Falls back to the
     /// patch alone for file-level findings or files without head content.
     #[must_use]
-    #[allow(dead_code)]
     pub fn lens_context(&self, finding: &SynthFinding) -> String {
         let patch = self.patch_for(finding).to_string();
         if finding.line == 0 {
@@ -125,7 +122,6 @@ fn parse_hunk_header(line: &str) -> Option<(u32, u32)> {
 
 /// Returns the lines of `content` within `radius` of `line` (1-based), each
 /// prefixed by its line number, joined by newlines. Empty when out of range.
-#[allow(dead_code)]
 fn head_window(content: &str, line: u32, radius: u32) -> String {
     let line = usize::try_from(line).unwrap_or(usize::MAX);
     let radius = usize::try_from(radius).unwrap_or(usize::MAX);
@@ -229,6 +225,59 @@ pub async fn fetch_head_sha(
         .context("failed to get PR head SHA")?;
 
     Ok(pr.head.sha)
+}
+
+/// Fetches the decoded content of `path` at commit `sha`, or `None` when the
+/// path is absent or not decodable as UTF-8 text (binary, submodule).
+pub async fn fetch_head_file(
+    octo: &Octocrab,
+    owner: &str,
+    repo: &str,
+    path: &str,
+    sha: &str,
+) -> anyhow::Result<Option<String>> {
+    let contents = octo
+        .repos(owner, repo)
+        .get_content()
+        .path(path)
+        .r#ref(sha)
+        .send()
+        .await
+        .context("failed to fetch head file content")?;
+    Ok(contents
+        .items
+        .into_iter()
+        .next()
+        .and_then(|item| item.decoded_content()))
+}
+
+/// Fills `ctx.head_files` with the head content of every distinct file named by
+/// a line-located finding that also has a per-file patch. Failures degrade
+/// gracefully: a missing or unreadable file is simply skipped.
+pub async fn populate_head_files(
+    octo: &Octocrab,
+    owner: &str,
+    repo: &str,
+    sha: &str,
+    findings: &[SynthFinding],
+    ctx: &mut DiffContext,
+) {
+    let mut wanted: Vec<String> = findings
+        .iter()
+        .filter(|f| f.line > 0 && ctx.by_file.contains_key(&f.file))
+        .map(|f| f.file.clone())
+        .collect();
+    wanted.sort();
+    wanted.dedup();
+    for path in wanted {
+        match fetch_head_file(octo, owner, repo, &path, sha).await {
+            Ok(Some(content)) => {
+                ctx.head_files.insert(path, content);
+            }
+            Ok(None) => {}
+            Err(error) => eprintln!("warning: could not fetch head file {path}: {error}"),
+        }
+    }
 }
 
 /// Upsert the global bot comment (edit if marker found, create otherwise).

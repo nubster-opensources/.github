@@ -28,7 +28,7 @@ pub async fn run_team(
     pr_number: u64,
 ) -> anyhow::Result<()> {
     println!("Fetching PR #{pr_number} diff for team review…");
-    let ctx = github::fetch_diff_context(&clients.octo, owner, repo, pr_number).await?;
+    let mut ctx = github::fetch_diff_context(&clients.octo, owner, repo, pr_number).await?;
     if ctx.full.trim().is_empty() {
         println!("Empty diff — nothing to review.");
         return Ok(());
@@ -59,6 +59,9 @@ pub async fn run_team(
         );
         findings.truncate(MAX_VERIFIED_FINDINGS);
     }
+
+    let head_sha = github::fetch_head_sha(&clients.octo, owner, repo, pr_number).await?;
+    github::populate_head_files(&clients.octo, owner, repo, &head_sha, &findings, &mut ctx).await;
 
     println!(
         "Verifying {} finding(s) with the 3-lens vote…",
@@ -91,7 +94,7 @@ pub async fn run_team(
     println!("Upserting team comment…");
     github::upsert_global_comment(&clients.octo, owner, repo, pr_number, &body, MARKER).await?;
 
-    post_confirmed_inline(clients, owner, repo, pr_number, &scored).await?;
+    post_confirmed_inline(clients, owner, repo, pr_number, &head_sha, &scored).await?;
 
     println!("Team review complete.");
     Ok(())
@@ -194,7 +197,7 @@ async fn verify_findings(
         if prefilled[idx].is_some() {
             continue;
         }
-        let patch = ctx.patch_for(finding).to_owned();
+        let patch = ctx.lens_context(finding);
         for lens in LENSES {
             let permit_source = Arc::clone(&semaphore);
             let client = clients.http.clone();
@@ -237,6 +240,7 @@ async fn post_confirmed_inline(
     owner: &str,
     repo: &str,
     pr_number: u64,
+    head_sha: &str,
     scored: &[(SynthFinding, FindingVerdict)],
 ) -> anyhow::Result<()> {
     let inline: Vec<github::InlineComment> = scored
@@ -253,14 +257,13 @@ async fn post_confirmed_inline(
         return Ok(());
     }
 
-    let head_sha = github::fetch_head_sha(&clients.octo, owner, repo, pr_number).await?;
     println!("Posting {} confirmed inline comment(s)…", inline.len());
     github::post_inline_comments(
         &clients.github_token,
         owner,
         repo,
         pr_number,
-        &head_sha,
+        head_sha,
         &inline,
     )
     .await
