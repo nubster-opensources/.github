@@ -227,8 +227,10 @@ pub async fn fetch_head_sha(
     Ok(pr.head.sha)
 }
 
-/// Fetches the decoded content of `path` at commit `sha`, or `None` when the
-/// path is absent or not decodable as UTF-8 text (binary, submodule).
+/// Fetches the decoded text content of `path` at commit `sha`. Returns
+/// `Ok(None)` when the content cannot be decoded as UTF-8 text (binary file or
+/// submodule). A missing path surfaces as an `Err`; callers that want a missing
+/// file to be a no-op should treat the error as a skip.
 pub async fn fetch_head_file(
     octo: &Octocrab,
     owner: &str,
