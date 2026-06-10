@@ -450,31 +450,34 @@ fn synthesis_system_prompt() -> String {
 6. Anchor to code: every "message" MUST name the concrete code element involved (a function, type, variable, or call) so it can be verified against the diff.
 7. Categorise: tag each finding with a "category" from ["bug","security","design","performance","test-gap"].
 8. Surface disagreement: if two agents contradict each other on the same point, state that explicitly in the message instead of silently choosing a side.
-9. Summarise: write a 3-5 sentence executive summary of what the PR does and its overall quality, and list concrete strengths.
+9. Summarise: write a 3-5 sentence executive summary of what the PR does and its overall quality, and list concrete strengths. Provide BOTH an English version and a French version of every human-readable string.
 10. Do NOT emit a verdict or recommendation — that is computed deterministically downstream.
 
 Respond ONLY with a valid JSON object:
 {
-  "executive_summary": "3-5 sentences on what the PR does and its overall quality.",
-  "strengths": ["specific strength 1", "specific strength 2"],
+  "executive_summary": "3-5 sentences in English on what the PR does and its overall quality.",
+  "executive_summary_fr": "Same summary in French.",
+  "strengths": ["specific strength in English"],
+  "strengths_fr": ["same strength in French"],
   "findings": [
     {
       "file": "exact/path/from/the/reports.rs",
       "line": 42,
       "severity": "critical",
       "category": "security",
-      "message": "Names the concrete code element and the issue in one sentence.",
+      "message": "Names the concrete code element and the issue in one English sentence.",
+      "message_fr": "Same finding in one French sentence.",
       "sources": ["security", "correctness"]
     }
   ]
 }
 
-Rules: severity MUST be "critical" or "minor". category MUST be one of ["bug","security","design","performance","test-gap"]. line MUST be the line from the reports, or 0 for a file-level concern. sources MUST be a non-empty subset of ["correctness","security","architecture","performance"]. Return valid JSON only, no markdown fences."#
+Rules: severity MUST be "critical" or "minor". category MUST be one of ["bug","security","design","performance","test-gap"]. line MUST be the line from the reports, or 0 for a file-level concern. sources MUST be a non-empty subset of ["correctness","security","architecture","performance"]. Return valid JSON only, no markdown fences. Every *_fr field MUST be the French translation of its English counterpart."#
         .to_string()
 }
 
 const LENS_OUTPUT_SPEC: &str = r#"Respond ONLY with a valid JSON object:
-{ "contested": true, "reason": "one-sentence justification grounded in the shown code" }
+{ "contested": true, "reason": "one-sentence English justification grounded in the shown code", "reason_fr": "same justification in French" }
 
 "contested": true  means the finding should NOT be trusted and acted on as-is.
 "contested": false means the shown code confirms a genuine, in-scope issue.
