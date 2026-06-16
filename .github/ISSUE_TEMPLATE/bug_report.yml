@@ -1,0 +1,79 @@
+name: Bug report
+description: Report a defect
+title: "bug: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug. Please fill the sections below as completely as you can; the more information we have, the faster we can help.
+
+  - type: input
+    id: version
+    attributes:
+      label: "Crate(s) and version"
+      description: "e.g. `my_crate 0.1.0`"
+      placeholder: "my_crate 0.1.0"
+    validations:
+      required: true
+
+  - type: input
+    id: rust_version
+    attributes:
+      label: Rust toolchain
+      description: Output of `rustc --version`
+      placeholder: rustc 1.88.0 (stable)
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: Ubuntu 24.04 / macOS 14.5 / Windows 11
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Minimal sequence of actions or a code snippet that triggers the issue.
+      placeholder: |
+        1. ...
+        2. ...
+        3. Observe ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behaviour
+      description: Include error messages, panics or unexpected output.
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or tracing output
+      description: "Paste relevant `tracing` output, ideally at `debug` level."
+      render: shell
+    validations:
+      required: false
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Anything else worth knowing (custom configuration, manifest excerpt, etc.).
+    validations:
+      required: false
