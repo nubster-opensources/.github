@@ -1,0 +1,26 @@
+# Normalise line endings to LF on commit, regardless of the contributor's
+# platform. Eliminates the noisy "LF will be replaced by CRLF" warnings
+# we accumulated while developing on Windows.
+
+* text=auto eol=lf
+
+# Binary files: leave them alone.
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.wasm binary
+*.pdf  binary
+
+# Rust / TOML / YAML / Markdown explicitly LF.
+*.rs   text eol=lf
+*.toml text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+*.md   text eol=lf
+*.json text eol=lf
+
+# Windows-only scripts keep CRLF endings so cmd.exe still runs them.
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
