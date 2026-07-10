@@ -78,11 +78,11 @@ async fn run_analysis(
     let (diff, file_count) = github::fetch_diff(&clients.octo, owner, repo, pr_number).await?;
 
     if diff.trim().is_empty() {
-        println!("Empty diff — nothing to review.");
+        println!("Empty diff: nothing to review.");
         return Ok(());
     }
 
-    println!("Calling Mistral ({model}) — {label}…");
+    println!("Calling Mistral ({model}): {label}…");
     let (response, truncated) = match mode {
         Mode::Review => {
             mistral::call_review(&clients.http, &clients.mistral_key, model, &diff).await?
@@ -147,11 +147,11 @@ async fn run_product(
     let (diff, _) = github::fetch_diff(&clients.octo, owner, repo, pr_number).await?;
 
     if diff.trim().is_empty() {
-        println!("Empty diff — nothing to review.");
+        println!("Empty diff: nothing to review.");
         return Ok(());
     }
 
-    println!("Calling Mistral ({model}) — {label}…");
+    println!("Calling Mistral ({model}): {label}…");
     let body = mistral::call_product(&clients.http, &clients.mistral_key, model, &diff).await?;
 
     let full_body = format!("{marker}\n{body}");
@@ -173,7 +173,7 @@ async fn run_describe(
     let is_empty = current_body.trim().is_empty() || current_body.trim().starts_with("<!--");
 
     if !is_empty {
-        println!("PR body already set — skipping describe mode.");
+        println!("PR body already set: skipping describe mode.");
         return Ok(());
     }
 
