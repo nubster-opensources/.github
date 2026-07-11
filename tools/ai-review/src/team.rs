@@ -30,7 +30,7 @@ pub async fn run_team(
     println!("Fetching PR #{pr_number} diff for team review…");
     let mut ctx = github::fetch_diff_context(&clients.octo, owner, repo, pr_number).await?;
     if ctx.full.trim().is_empty() {
-        println!("Empty diff — nothing to review.");
+        println!("Empty diff: nothing to review.");
         return Ok(());
     }
 

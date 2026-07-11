@@ -31,14 +31,15 @@ pub fn render_global_comment(
     marker: &str,
     label: &str,
 ) -> String {
-    let mut md = format!("{marker}\n## {label} IA\n\n");
+    let mut md = format!("{marker}\n## {label}\n\n");
 
-    write!(md, "### Vue d'ensemble\n{}\n\n", response.summary).unwrap();
+    // fmt::Write to String is infallible, so the Result of write!/writeln! is deliberately ignored.
+    let _ = write!(md, "### Overview\n{}\n\n", response.summary);
 
     if !response.strengths.is_empty() {
-        md.push_str("### Points forts\n");
+        md.push_str("### Strengths\n");
         for s in &response.strengths {
-            writeln!(md, "- {s}").unwrap();
+            let _ = writeln!(md, "- {s}");
         }
         md.push('\n');
     }
@@ -47,20 +48,20 @@ pub fn render_global_comment(
     if !globals.is_empty() {
         md.push_str("### Suggestions\n");
         for f in globals {
-            writeln!(md, "- **{}** : {}", f.file, f.message).unwrap();
+            let _ = writeln!(md, "- **{}**: {}", f.file, f.message);
         }
         md.push('\n');
     }
 
     if !response.security.starts_with("N/A") {
-        write!(md, "### Sécurité\n{}\n\n", response.security).unwrap();
+        let _ = write!(md, "### Security\n{}\n\n", response.security);
     }
 
     md.push_str("---\n");
     if truncated {
-        md.push_str("⚠️ *Diff tronqué (trop volumineux) — review partielle.*  \n");
+        md.push_str("⚠️ *Diff truncated (too large): partial review.*  \n");
     }
-    write!(md, "*Modèle : {model} · Diff : {file_count} fichier(s)*").unwrap();
+    let _ = write!(md, "*Model: {model} · Diff: {file_count} file(s)*");
 
     md
 }
@@ -157,39 +158,36 @@ pub fn render_team_comment(view: &TeamCommentView) -> String {
     };
 
     let mut md = "<!-- ai-team-bot -->\n## Team Review\n\n".to_string();
-    writeln!(
+    let _ = writeln!(
         md,
-        "**Verdict : {verdict_badge}** · {confirmed_count} confirmed · {contested_count} contested\n"
-    )
-    .unwrap();
+        "**Verdict: {verdict_badge}** · {confirmed_count} confirmed · {contested_count} contested\n"
+    );
 
     md.push_str(&render_lang_block(view, Lang::En));
     md.push_str(&render_lang_block(view, Lang::Fr));
 
     md.push_str("---\n");
     let ok_labels: Vec<&str> = view.agents_ok.iter().map(|a| a.label()).collect();
-    write!(md, "*Agents : {}", ok_labels.join(", ")).unwrap();
+    let _ = write!(md, "*Agents: {}", ok_labels.join(", "));
     if !view.agents_failed.is_empty() {
         let failed_labels: Vec<&str> = view.agents_failed.iter().map(|a| a.label()).collect();
-        write!(md, " · failed : {}", failed_labels.join(", ")).unwrap();
+        let _ = write!(md, " · failed: {}", failed_labels.join(", "));
     }
-    writeln!(md).unwrap();
-    write!(
+    let _ = writeln!(md);
+    let _ = write!(
         md,
-        "Findings : {} raw -> {} merged",
+        "Findings: {} raw -> {} merged",
         view.raw_count, view.dedup_count
-    )
-    .unwrap();
+    );
     if view.capped > 0 {
-        write!(md, " -> {} unverified (cap)", view.capped).unwrap();
+        let _ = write!(md, " -> {} unverified (cap)", view.capped);
     }
-    writeln!(md).unwrap();
-    write!(
+    let _ = writeln!(md);
+    let _ = write!(
         md,
-        "Model : {} · Diff : {} file(s)*",
+        "Model: {} · Diff: {} file(s)*",
         view.model, view.file_count
-    )
-    .unwrap();
+    );
 
     md
 }
@@ -203,17 +201,17 @@ fn render_lang_block(view: &TeamCommentView, lang: Lang) -> String {
         ""
     };
     let mut md = String::new();
-    writeln!(md, "<details{open}><summary>{}</summary>\n", labels.summary).unwrap();
+    let _ = writeln!(md, "<details{open}><summary>{}</summary>\n", labels.summary);
 
     let summary = pick(view.executive_summary, view.executive_summary_fr, lang);
-    writeln!(md, "**{}**\n{summary}\n", labels.overview).unwrap();
+    let _ = writeln!(md, "**{}**\n{summary}\n", labels.overview);
 
     let strengths = pick_list(view.strengths, view.strengths_fr, lang);
     if !strengths.is_empty() {
-        writeln!(md, "**{}**", labels.strengths).unwrap();
+        let _ = writeln!(md, "**{}**", labels.strengths);
         md.push('\n');
         for s in strengths {
-            writeln!(md, "- {s}").unwrap();
+            let _ = writeln!(md, "- {s}");
         }
         md.push('\n');
     }
@@ -232,43 +230,42 @@ fn render_lang_block(view: &TeamCommentView, lang: Lang) -> String {
         view.scored.iter().filter(|(_, v)| v.contested).collect();
 
     if !confirmed_critical.is_empty() {
-        writeln!(md, "**{}**", labels.confirmed).unwrap();
+        let _ = writeln!(md, "**{}**", labels.confirmed);
         md.push('\n');
         for (f, _) in &confirmed_critical {
-            writeln!(md, "{}", render_finding_line(f, lang)).unwrap();
+            let _ = writeln!(md, "{}", render_finding_line(f, lang));
         }
         md.push('\n');
     }
 
     if !confirmed_minor.is_empty() {
-        writeln!(
+        let _ = writeln!(
             md,
             "<details><summary>{} ({})</summary>\n",
             labels.minor,
             confirmed_minor.len()
-        )
-        .unwrap();
+        );
         for (f, _) in &confirmed_minor {
-            writeln!(md, "{}", render_finding_line(f, lang)).unwrap();
+            let _ = writeln!(md, "{}", render_finding_line(f, lang));
         }
         md.push_str("\n</details>\n\n");
     }
 
     if !contested.is_empty() {
-        writeln!(md, "**{}**", labels.contested).unwrap();
+        let _ = writeln!(md, "**{}**", labels.contested);
         md.push('\n');
         for (f, v) in &contested {
-            writeln!(md, "{}", render_finding_line(f, lang)).unwrap();
+            let _ = writeln!(md, "{}", render_finding_line(f, lang));
             let reasons = pick_list(&v.reasons, &v.reasons_fr, lang);
             if let Some(reason) = reasons.first() {
-                writeln!(md, "  - _{reason}_").unwrap();
+                let _ = writeln!(md, "  - _{reason}_");
             }
         }
         md.push('\n');
     }
 
     if view.scored.is_empty() {
-        writeln!(md, "{}\n", labels.nothing).unwrap();
+        let _ = writeln!(md, "{}\n", labels.nothing);
     }
 
     md.push_str("</details>\n\n");
@@ -292,7 +289,7 @@ fn render_finding_line(f: &SynthFinding, lang: Lang) -> String {
     };
     let message = pick(&f.message, &f.message_fr, lang);
     format!(
-        "- {sev} `{}` **{}** : {message}{sources}",
+        "- {sev} `{}` **{}**: {message}{sources}",
         f.category.label(),
         location
     )
@@ -358,10 +355,10 @@ mod tests {
             "Code Review",
         );
         assert!(comment.starts_with("<!-- ai-review-bot -->"));
-        assert!(comment.contains("Code Review IA"));
+        assert!(comment.contains("## Code Review\n"));
         assert!(comment.contains("Adds manifest parsing."));
-        assert!(comment.contains("Points forts"));
-        assert!(comment.contains("Sécurité"));
+        assert!(comment.contains("Strengths"));
+        assert!(comment.contains("Security"));
         assert!(comment.contains("codestral-latest"));
     }
 
@@ -377,7 +374,7 @@ mod tests {
             "Security Review",
         );
         assert!(comment.starts_with("<!-- ai-security-bot -->"));
-        assert!(comment.contains("Security Review IA"));
+        assert!(comment.contains("## Security Review\n"));
     }
 
     #[test]
@@ -391,7 +388,7 @@ mod tests {
             "<!-- ai-review-bot -->",
             "Code Review",
         );
-        assert!(comment.contains("Diff tronqué"));
+        assert!(comment.contains("Diff truncated"));
     }
 
     #[test]
