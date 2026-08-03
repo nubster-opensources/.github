@@ -6,11 +6,11 @@ We design small, composable, dependency-light building blocks: messaging, orches
 
 ## Featured projects
 
-- [hexeract](https://github.com/nubster-opensources/hexeract) - batteries-included messaging framework (Mediator, Bus, Outbox, Sagas, Scheduler).
+- [hexeract](https://github.com/nubster-opensources/hexeract) - Rust messaging framework (Mediator, Bus, Outbox, Sagas, Scheduler).
 - [lightshuttle](https://github.com/nubster-opensources/lightshuttle) - lightweight development orchestrator with a dashboard and a production export.
 - [flaps](https://github.com/nubster-opensources/flaps) - feature flag server and SDK with OFREP and in-process evaluation.
 - [isochron](https://github.com/nubster-opensources/isochron) - cron expression engine computing the next occurrence over a calendar.
-- [eidosdb](https://github.com/nubster-opensources/eidosdb) - pure-Rust vector database, single binary, edge-ready.
+- [eidosdb](https://github.com/nubster-opensources/eidosdb) - vector database, single binary, edge-ready.
 
 ## How we work
 
