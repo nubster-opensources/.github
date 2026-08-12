@@ -22,6 +22,13 @@ reusable workflow forwards from its `mode` input.
 | `describe` | Fills an empty PR description from the diff | mistral-small |
 | `team` | Multi-agent review: four specialist agents run in parallel, a synthesis step merges and deduplicates their findings, then every finding is checked by a three-lens adversarial vote before a deterministic verdict | codestral + mistral-large |
 
+The reviewer follows every page of GitHub's changed-file response. In `team`
+mode it splits large textual patches into bounded UTF-8-safe batches without
+cutting ordinary hunks or lines. Missing patches, oversized inputs, exhausted
+batch budgets, and specialist failures are listed explicitly as partial
+coverage in the team comment. Line-located findings are accepted only when
+they point to a line actually added by the pull request.
+
 ### Calling the reusable workflow
 
 Default per-PR setup, the multi-agent team review plus the PR description.

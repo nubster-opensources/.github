@@ -1,7 +1,9 @@
+mod batching;
 mod github;
 mod mistral;
 mod review;
 mod team;
+mod text;
 mod types;
 
 use anyhow::Context;
@@ -75,7 +77,8 @@ async fn run_analysis(
     let label = mode.display_label();
 
     println!("Fetching PR #{pr_number} diff…");
-    let (diff, file_count) = github::fetch_diff(&clients.octo, owner, repo, pr_number).await?;
+    let ctx = github::fetch_diff_context(&clients.octo, owner, repo, pr_number).await?;
+    let diff = &ctx.full;
 
     if diff.trim().is_empty() {
         println!("Empty diff: nothing to review.");
@@ -85,27 +88,30 @@ async fn run_analysis(
     println!("Calling Mistral ({model}): {label}…");
     let (response, truncated) = match mode {
         Mode::Review => {
-            mistral::call_review(&clients.http, &clients.mistral_key, model, &diff).await?
+            mistral::call_review(&clients.http, &clients.mistral_key, model, diff).await?
         }
         Mode::Security => {
-            mistral::call_security(&clients.http, &clients.mistral_key, model, &diff).await?
+            mistral::call_security(&clients.http, &clients.mistral_key, model, diff).await?
         }
         Mode::Architecture => {
-            mistral::call_architecture(&clients.http, &clients.mistral_key, model, &diff).await?
+            mistral::call_architecture(&clients.http, &clients.mistral_key, model, diff).await?
         }
         Mode::Performance => {
-            mistral::call_performance(&clients.http, &clients.mistral_key, model, &diff).await?
+            mistral::call_performance(&clients.http, &clients.mistral_key, model, diff).await?
         }
         _ => unreachable!(),
     };
 
     let global_body =
-        review::render_global_comment(&response, file_count, model, truncated, marker, label);
+        review::render_global_comment(&response, ctx.file_count, model, truncated, marker, label);
     println!("Upserting global comment…");
     github::upsert_global_comment(&clients.octo, owner, repo, pr_number, &global_body, marker)
         .await?;
 
-    let inline = review::inline_findings(&response);
+    let inline: Vec<_> = review::inline_findings(&response)
+        .into_iter()
+        .filter(|finding| ctx.line_is_added_at(&finding.file, finding.line) == Some(true))
+        .collect();
     if !inline.is_empty() {
         let head_sha = github::fetch_head_sha(&clients.octo, owner, repo, pr_number).await?;
         let comments: Vec<InlineComment> = inline

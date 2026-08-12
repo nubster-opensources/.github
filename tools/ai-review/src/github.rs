@@ -1,13 +1,18 @@
 #![allow(clippy::missing_errors_doc)]
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt::Write as _;
 
 use anyhow::Context;
+use octocrab::models::repos::{DiffEntry, DiffEntryStatus};
 use octocrab::Octocrab;
 
+use crate::batching::{build_review_batches, DEFAULT_BATCH_BYTES, DEFAULT_MAX_BATCHES};
 use crate::review::has_bot_marker;
-use crate::types::SynthFinding;
+use crate::text::truncate_utf8;
+use crate::types::{
+    ChangedFile, ChangedFileStatus, CoverageGap, PatchAvailability, ReviewBatch, SynthFinding,
+};
 
 /// An inline comment to post on a specific file line.
 pub struct InlineComment {
@@ -18,7 +23,7 @@ pub struct InlineComment {
 
 /// Maximum bytes of the full diff handed to a lens as fallback context when a
 /// finding has no per-file patch (file-level or cross-file findings).
-const PATCH_FALLBACK_CHARS: usize = 8_000;
+const PATCH_FALLBACK_BYTES: usize = 8_000;
 
 /// Number of head-file lines shown on each side of a finding's line to a lens.
 const LENS_WINDOW_LINES: u32 = 40;
@@ -29,6 +34,9 @@ pub struct DiffContext {
     pub by_file: HashMap<String, String>,
     pub head_files: HashMap<String, String>,
     pub file_count: usize,
+    pub files: Vec<ChangedFile>,
+    pub batches: Vec<ReviewBatch>,
+    pub coverage_gaps: Vec<CoverageGap>,
 }
 
 impl DiffContext {
@@ -38,7 +46,7 @@ impl DiffContext {
     pub fn patch_for(&self, finding: &SynthFinding) -> &str {
         match self.by_file.get(&finding.file) {
             Some(patch) if !patch.is_empty() => patch.as_str(),
-            _ => safe_truncate(&self.full, PATCH_FALLBACK_CHARS),
+            _ => truncate_utf8(&self.full, PATCH_FALLBACK_BYTES).0,
         }
     }
 
@@ -62,48 +70,25 @@ impl DiffContext {
         format!("{patch}\n\nFull-file context around the finding (head):\n{window}")
     }
 
-    /// Reports whether the finding's line falls inside a hunk of its file
-    /// patch: `Some(true)` when it does, `Some(false)` when the patch is
-    /// known and the line belongs to no hunk, and `None` when the question
-    /// cannot be decided (file-level finding or no per-file patch).
+    /// Reports whether the finding points to a line actually added by the pull
+    /// request. Context lines and deletion-only lines return `Some(false)`.
     #[must_use]
-    pub fn line_in_patch(&self, finding: &SynthFinding) -> Option<bool> {
-        if finding.line == 0 {
+    pub fn line_is_added(&self, finding: &SynthFinding) -> Option<bool> {
+        self.line_is_added_at(&finding.file, finding.line)
+    }
+
+    /// Reports whether `line` in `file` is an added line in this diff.
+    #[must_use]
+    pub fn line_is_added_at(&self, file: &str, line: u32) -> Option<bool> {
+        if line == 0 {
             return None;
         }
-        let patch = self.by_file.get(&finding.file).filter(|p| !p.is_empty())?;
-        let hunks = parse_hunks(patch);
-        if hunks.is_empty() {
-            return None;
+        let file = self.files.iter().find(|changed| changed.path == file)?;
+        match file.patch {
+            PatchAvailability::Present(_) => Some(file.added_lines.contains(&line)),
+            PatchAvailability::Missing => None,
         }
-        Some(hunks.iter().any(|h| h.contains_new_line(finding.line)))
     }
-}
-
-/// The new-file line range covered by one hunk of a unified diff patch.
-struct Hunk {
-    new_start: u32,
-    new_count: u32,
-}
-
-impl Hunk {
-    /// Returns true when `line` (new-file side) falls inside this hunk.
-    fn contains_new_line(&self, line: u32) -> bool {
-        line >= self.new_start
-            && u64::from(line) < u64::from(self.new_start) + u64::from(self.new_count)
-    }
-}
-
-/// Extracts the hunk ranges of a unified diff patch from its `@@` headers.
-fn parse_hunks(patch: &str) -> Vec<Hunk> {
-    patch
-        .lines()
-        .filter_map(parse_hunk_header)
-        .map(|(new_start, new_count)| Hunk {
-            new_start,
-            new_count,
-        })
-        .collect()
 }
 
 /// Parses the new-file range of a `@@ -a,b +c,d @@` header into (start, count).
@@ -118,6 +103,35 @@ fn parse_hunk_header(line: &str) -> Option<(u32, u32)> {
         Some((start, count)) => Some((start.parse().ok()?, count.parse().ok()?)),
         None => Some((range.parse().ok()?, 1)),
     }
+}
+
+/// Parses the exact new-file line numbers represented by `+` records.
+pub(crate) fn parse_added_lines(patch: &str) -> BTreeSet<u32> {
+    let mut added = BTreeSet::new();
+    let mut new_line = None;
+
+    for line in patch.lines() {
+        if let Some((start, _)) = parse_hunk_header(line) {
+            new_line = Some(start);
+            continue;
+        }
+        let Some(current) = new_line else {
+            continue;
+        };
+        if line.starts_with('+') {
+            if current > 0 {
+                added.insert(current);
+            }
+            new_line = current.checked_add(1);
+        } else if line.starts_with('-') {
+            // A deletion advances only the old-file cursor.
+        } else if !line.starts_with('\\') {
+            // Context lines advance both cursors. Unknown records are treated
+            // as context so a malformed patch cannot shift additions earlier.
+            new_line = current.checked_add(1);
+        }
+    }
+    added
 }
 
 /// Returns the lines of `content` within `radius` of `line` (1-based), each
@@ -138,18 +152,6 @@ fn head_window(content: &str, line: u32, radius: u32) -> String {
         .join("\n")
 }
 
-/// Truncates `s` to at most `max` bytes without splitting a UTF-8 sequence.
-fn safe_truncate(s: &str, max: usize) -> &str {
-    if s.len() <= max {
-        return s;
-    }
-    let mut end = max;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    &s[..end]
-}
-
 /// Returns the PR diff as a [`DiffContext`] (concatenated view plus per-file map).
 pub async fn fetch_diff_context(
     octo: &Octocrab,
@@ -157,31 +159,91 @@ pub async fn fetch_diff_context(
     repo: &str,
     pr_number: u64,
 ) -> anyhow::Result<DiffContext> {
-    let files = octo
+    let first_page = octo
         .pulls(owner, repo)
         .list_files(pr_number)
         .await
         .context("failed to list PR files")?;
+    let entries = octo
+        .all_pages(first_page)
+        .await
+        .context("failed to fetch every PR files page")?;
 
-    let file_count = files.items.len();
+    build_diff_context(entries)
+}
+
+fn build_diff_context(entries: Vec<DiffEntry>) -> anyhow::Result<DiffContext> {
+    let mut seen = HashSet::with_capacity(entries.len());
+    let mut files = Vec::with_capacity(entries.len());
+    for entry in entries {
+        if !seen.insert(entry.filename.clone()) {
+            anyhow::bail!(
+                "GitHub returned duplicate changed file path: {}",
+                entry.filename
+            );
+        }
+        files.push(changed_file(entry));
+    }
+
+    let file_count = files.len();
     let mut full = String::new();
     let mut by_file = HashMap::with_capacity(file_count);
 
-    for file in &files.items {
-        writeln!(full, "--- {}", file.filename).unwrap();
-        if let Some(patch) = &file.patch {
-            full.push_str(patch);
-            by_file.insert(file.filename.clone(), patch.clone());
+    for file in &files {
+        writeln!(full, "--- {}", file.path).unwrap();
+        match &file.patch {
+            PatchAvailability::Present(patch) => {
+                full.push_str(patch);
+                by_file.insert(file.path.clone(), patch.clone());
+            }
+            PatchAvailability::Missing => full.push_str("[textual patch unavailable]"),
         }
         full.push('\n');
     }
+
+    let plan = build_review_batches(&files, DEFAULT_BATCH_BYTES, DEFAULT_MAX_BATCHES);
 
     Ok(DiffContext {
         full,
         by_file,
         head_files: HashMap::new(),
         file_count,
+        files,
+        batches: plan.batches,
+        coverage_gaps: plan.gaps,
     })
+}
+
+fn changed_file(entry: DiffEntry) -> ChangedFile {
+    let patch = entry
+        .patch
+        .filter(|patch| !patch.is_empty())
+        .map_or(PatchAvailability::Missing, PatchAvailability::Present);
+    let added_lines = match &patch {
+        PatchAvailability::Present(text) => parse_added_lines(text),
+        PatchAvailability::Missing => BTreeSet::new(),
+    };
+    ChangedFile {
+        path: entry.filename,
+        status: changed_file_status(&entry.status),
+        previous_path: entry.previous_filename,
+        additions: entry.additions,
+        deletions: entry.deletions,
+        patch,
+        added_lines,
+    }
+}
+
+fn changed_file_status(status: &DiffEntryStatus) -> ChangedFileStatus {
+    match status {
+        DiffEntryStatus::Added => ChangedFileStatus::Added,
+        DiffEntryStatus::Removed => ChangedFileStatus::Removed,
+        DiffEntryStatus::Modified => ChangedFileStatus::Modified,
+        DiffEntryStatus::Renamed => ChangedFileStatus::Renamed,
+        DiffEntryStatus::Copied => ChangedFileStatus::Copied,
+        DiffEntryStatus::Unchanged => ChangedFileStatus::Unchanged,
+        _ => ChangedFileStatus::Changed,
+    }
 }
 
 /// Returns (concatenated diff as string, number of changed files).
@@ -432,11 +494,23 @@ mod tests {
     fn ctx_with(file: &str, patch: &str) -> DiffContext {
         let mut by_file = HashMap::new();
         by_file.insert(file.to_string(), patch.to_string());
+        let changed = ChangedFile {
+            path: file.to_string(),
+            status: ChangedFileStatus::Modified,
+            previous_path: None,
+            additions: 1,
+            deletions: 0,
+            patch: PatchAvailability::Present(patch.to_string()),
+            added_lines: parse_added_lines(patch),
+        };
         DiffContext {
             full: format!("--- {file}\n{patch}\n"),
             by_file,
             head_files: HashMap::new(),
             file_count: 1,
+            files: vec![changed],
+            batches: vec![],
+            coverage_gaps: vec![],
         }
     }
 
@@ -461,11 +535,20 @@ mod tests {
     }
 
     #[test]
-    fn splits_patch_into_hunk_ranges() {
-        let hunks = parse_hunks(TWO_HUNK_PATCH);
-        assert_eq!(hunks.len(), 2);
-        assert_eq!((hunks[0].new_start, hunks[0].new_count), (1, 5));
-        assert_eq!((hunks[1].new_start, hunks[1].new_count), (11, 4));
+    fn parses_only_lines_actually_added() {
+        let added = parse_added_lines(TWO_HUNK_PATCH);
+        assert_eq!(added, BTreeSet::from([2, 3, 12]));
+    }
+
+    #[test]
+    fn parses_new_files_multiple_hunks_and_no_newline_markers() {
+        let patch = "@@ -0,0 +1,2 @@\n+first\n+second\n\\ No newline at end of file\n@@ -10,1 +12,2 @@\n context\n+third";
+        assert_eq!(parse_added_lines(patch), BTreeSet::from([1, 2, 13]));
+        assert!(parse_added_lines("@@ -1,1 +0,0 @@\n-old").is_empty());
+        assert_eq!(
+            parse_added_lines("@@ -0,0 +1 @@\n++++ value starts with pluses"),
+            BTreeSet::from([1])
+        );
     }
 
     const HEAD_FILE: &str = "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8";
@@ -515,17 +598,141 @@ mod tests {
     }
 
     #[test]
-    fn line_in_patch_reports_hunk_membership() {
+    fn line_is_added_rejects_context_inside_hunks() {
         let ctx = ctx_with("src/lib.rs", TWO_HUNK_PATCH);
-        assert_eq!(ctx.line_in_patch(&finding_at("src/lib.rs", 3)), Some(true));
-        assert_eq!(ctx.line_in_patch(&finding_at("src/lib.rs", 12)), Some(true));
-        assert_eq!(ctx.line_in_patch(&finding_at("src/lib.rs", 8)), Some(false));
+        assert_eq!(ctx.line_is_added(&finding_at("src/lib.rs", 3)), Some(true));
+        assert_eq!(ctx.line_is_added(&finding_at("src/lib.rs", 12)), Some(true));
+        assert_eq!(ctx.line_is_added(&finding_at("src/lib.rs", 1)), Some(false));
+        assert_eq!(ctx.line_is_added(&finding_at("src/lib.rs", 4)), Some(false));
+        assert_eq!(ctx.line_is_added(&finding_at("src/lib.rs", 8)), Some(false));
         assert_eq!(
-            ctx.line_in_patch(&finding_at("src/lib.rs", 999)),
+            ctx.line_is_added(&finding_at("src/lib.rs", 999)),
             Some(false)
         );
-        assert_eq!(ctx.line_in_patch(&finding_at("src/lib.rs", 0)), None);
-        assert_eq!(ctx.line_in_patch(&finding_at("unknown.rs", 3)), None);
+        assert_eq!(ctx.line_is_added(&finding_at("src/lib.rs", 0)), None);
+        assert_eq!(ctx.line_is_added(&finding_at("unknown.rs", 3)), None);
+    }
+
+    #[test]
+    fn builds_context_for_all_thirty_one_files() {
+        let entries: Vec<DiffEntry> = (0..31)
+            .map(|index| {
+                serde_json::from_value(serde_json::json!({
+                    "sha": format!("sha-{index}"),
+                    "filename": format!("src/file{index}.rs"),
+                    "status": "modified",
+                    "additions": 1,
+                    "deletions": 0,
+                    "changes": 1,
+                    "blob_url": null,
+                    "raw_url": null,
+                    "contents_url": format!("https://api.github.test/file{index}"),
+                    "patch": "@@ -0,0 +1 @@\n+new"
+                }))
+                .expect("valid DiffEntry fixture")
+            })
+            .collect();
+        let ctx = build_diff_context(entries).expect("context");
+        assert_eq!(ctx.file_count, 31);
+        assert_eq!(ctx.files.len(), 31);
+        assert_eq!(ctx.by_file.len(), 31);
+        let covered: HashSet<_> = ctx
+            .batches
+            .iter()
+            .flat_map(|batch| batch.files.iter())
+            .collect();
+        assert_eq!(covered.len(), 31);
+    }
+
+    #[test]
+    fn preserves_rename_metadata_and_marks_empty_patches_missing() {
+        let entry: DiffEntry = serde_json::from_value(serde_json::json!({
+            "sha": "sha",
+            "filename": "src/new.rs",
+            "previous_filename": "src/old.rs",
+            "status": "renamed",
+            "additions": 0,
+            "deletions": 0,
+            "changes": 0,
+            "blob_url": null,
+            "raw_url": null,
+            "contents_url": "https://api.github.test/new",
+            "patch": ""
+        }))
+        .expect("valid renamed fixture");
+        let file = changed_file(entry);
+        assert_eq!(file.status, ChangedFileStatus::Renamed);
+        assert_eq!(file.previous_path.as_deref(), Some("src/old.rs"));
+        assert_eq!(file.patch, PatchAvailability::Missing);
+        assert!(file.added_lines.is_empty());
+    }
+
+    #[tokio::test]
+    async fn fetch_diff_context_follows_the_second_github_page() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        fn entry(index: usize) -> serde_json::Value {
+            serde_json::json!({
+                "sha": format!("sha-{index}"),
+                "filename": format!("src/file{index}.rs"),
+                "status": "modified",
+                "additions": 1,
+                "deletions": 0,
+                "changes": 1,
+                "blob_url": null,
+                "raw_url": null,
+                "contents_url": format!("https://api.github.test/file{index}"),
+                "patch": format!("@@ -0,0 +1 @@\n+const FILE: usize = {index};")
+            })
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let address = listener.local_addr().expect("address");
+        let first_body = serde_json::to_string(&(0..30).map(entry).collect::<Vec<_>>())
+            .expect("first page JSON");
+        let second_body = serde_json::to_string(&vec![entry(30)]).expect("second page JSON");
+        let server = tokio::spawn(async move {
+            for (index, body) in [first_body, second_body].into_iter().enumerate() {
+                let (mut socket, _) = listener.accept().await.expect("accept request");
+                let mut request = vec![0_u8; 4096];
+                let read = socket.read(&mut request).await.expect("read request");
+                let request = String::from_utf8_lossy(&request[..read]);
+                if index == 0 {
+                    assert!(request.starts_with("GET /repos/owner/repo/pulls/7/files"));
+                } else {
+                    assert!(request.starts_with("GET /repos/owner/repo/pulls/7/files?page=2"));
+                }
+                let link = if index == 0 {
+                    format!(
+                        "Link: <http://{address}/repos/owner/repo/pulls/7/files?page=2>; rel=\"next\"\r\n"
+                    )
+                } else {
+                    String::new()
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{link}Connection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                socket
+                    .write_all(response.as_bytes())
+                    .await
+                    .expect("write response");
+            }
+        });
+
+        let octo = octocrab::OctocrabBuilder::new()
+            .base_uri(format!("http://{address}"))
+            .expect("base URI")
+            .build()
+            .expect("Octocrab");
+        let ctx = fetch_diff_context(&octo, "owner", "repo", 7)
+            .await
+            .expect("all pages");
+        server.await.expect("server task");
+
+        assert_eq!(ctx.file_count, 31);
+        assert!(ctx.files.iter().any(|file| file.path == "src/file30.rs"));
     }
 
     #[test]
