@@ -453,10 +453,6 @@ pub async fn upsert_inline_comments(
     namespace: &str,
     comments: &[InlineComment],
 ) -> anyhow::Result<()> {
-    if comments.is_empty() {
-        return Ok(());
-    }
-
     let client = reqwest::Client::builder()
         .user_agent("ai-review-bot/0.1")
         .build()?;
@@ -489,12 +485,14 @@ async fn upsert_inline_comments_at(
     let prepared = prepare_inline_comments(namespace, head_sha, comments);
     let existing = list_review_comments(client, api_base, token, owner, repo, pr_number).await?;
     let mut new_comments = Vec::new();
+    let mut retained_existing_ids = HashSet::new();
 
     for comment in &prepared {
         if let Some(found) = existing
             .iter()
             .find(|existing| existing.body.contains(&comment.marker))
         {
+            retained_existing_ids.insert(found.id);
             if found.body != comment.body {
                 let url = format!(
                     "{api_base}/repos/{owner}/{repo}/pulls/comments/{}",
@@ -517,38 +515,56 @@ async fn upsert_inline_comments_at(
         }
     }
 
-    if new_comments.is_empty() {
-        return Ok(());
+    if !new_comments.is_empty() {
+        let gh_comments: Vec<GhComment<'_>> = new_comments
+            .iter()
+            .map(|comment| GhComment {
+                path: &comment.path,
+                line: comment.line,
+                side: "RIGHT",
+                body: &comment.body,
+            })
+            .collect();
+        let request = ReviewRequest {
+            commit_id: head_sha,
+            body: "",
+            event: "COMMENT",
+            comments: gh_comments,
+        };
+        let url = format!("{api_base}/repos/{owner}/{repo}/pulls/{pr_number}/reviews");
+
+        client
+            .post(&url)
+            .bearer_auth(token)
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .json(&request)
+            .send()
+            .await
+            .context("failed to post inline review")?
+            .error_for_status()
+            .context("GitHub rejected inline review")?;
     }
 
-    let gh_comments: Vec<GhComment<'_>> = new_comments
-        .iter()
-        .map(|comment| GhComment {
-            path: &comment.path,
-            line: comment.line,
-            side: "RIGHT",
-            body: &comment.body,
-        })
-        .collect();
-    let request = ReviewRequest {
-        commit_id: head_sha,
-        body: "",
-        event: "COMMENT",
-        comments: gh_comments,
-    };
-    let url = format!("{api_base}/repos/{owner}/{repo}/pulls/{pr_number}/reviews");
-
-    client
-        .post(&url)
-        .bearer_auth(token)
-        .header("Accept", "application/vnd.github+json")
-        .header("X-GitHub-Api-Version", "2022-11-28")
-        .json(&request)
-        .send()
-        .await
-        .context("failed to post inline review")?
-        .error_for_status()
-        .context("GitHub rejected inline review")?;
+    let scope_prefix = inline_scope_prefix(namespace, head_sha);
+    for stale in existing.iter().filter(|existing| {
+        existing.body.contains(&scope_prefix) && !retained_existing_ids.contains(&existing.id)
+    }) {
+        let url = format!(
+            "{api_base}/repos/{owner}/{repo}/pulls/comments/{}",
+            stale.id
+        );
+        client
+            .delete(url)
+            .bearer_auth(token)
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .send()
+            .await
+            .context("failed to delete stale inline review comment")?
+            .error_for_status()
+            .context("GitHub rejected stale inline review comment deletion")?;
+    }
 
     Ok(())
 }
@@ -622,20 +638,33 @@ fn prepare_inline_comments(
 }
 
 fn inline_comment_marker(namespace: &str, head_sha: &str, path: &str, line: u32) -> String {
+    let scope = stable_inline_hash(&[namespace.as_bytes(), head_sha.as_bytes()], None);
+    let location = stable_inline_hash(&[path.as_bytes()], Some(line));
+    format!("<!-- ai-review-inline:{scope:016x}:{location:016x} -->")
+}
+
+fn inline_scope_prefix(namespace: &str, head_sha: &str) -> String {
+    let scope = stable_inline_hash(&[namespace.as_bytes(), head_sha.as_bytes()], None);
+    format!("<!-- ai-review-inline:{scope:016x}:")
+}
+
+fn stable_inline_hash(parts: &[&[u8]], line: Option<u32>) -> u64 {
     // Stable FNV-1a keeps arbitrary file names out of the HTML marker while
     // preserving the same identity across binaries and workflow reruns.
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
-    for part in [namespace.as_bytes(), head_sha.as_bytes(), path.as_bytes()] {
+    for part in parts {
         for byte in part.iter().copied().chain(std::iter::once(0)) {
             hash ^= u64::from(byte);
             hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
         }
     }
-    for byte in line.to_le_bytes() {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    if let Some(line) = line {
+        for byte in line.to_le_bytes() {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
     }
-    format!("<!-- ai-review-inline:{hash:016x} -->")
+    hash
 }
 
 /// Update the PR description body.
@@ -1100,6 +1129,63 @@ mod tests {
         )
         .await
         .expect("upsert");
+        server.await.expect("server task");
+    }
+
+    #[tokio::test]
+    async fn inline_upsert_deletes_stale_comments_when_no_findings_remain() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let marker = inline_comment_marker("team", "abc123", "src/lib.rs", 12);
+        let existing = serde_json::json!([{
+            "id": 4242,
+            "body": format!("stale finding\n\n{marker}")
+        }])
+        .to_string();
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let address = listener.local_addr().expect("address");
+        let server = tokio::spawn(async move {
+            for (index, body) in [existing, "{}".to_string()].into_iter().enumerate() {
+                let (mut socket, _) = listener.accept().await.expect("accept request");
+                let mut request = vec![0_u8; 4096];
+                let read = socket.read(&mut request).await.expect("read request");
+                let request = String::from_utf8_lossy(&request[..read]);
+                if index == 0 {
+                    assert!(request.starts_with(
+                        "GET /repos/owner/repo/pulls/7/comments?per_page=100&page=1 "
+                    ));
+                } else {
+                    assert!(request.starts_with("DELETE /repos/owner/repo/pulls/comments/4242 "));
+                }
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                socket
+                    .write_all(response.as_bytes())
+                    .await
+                    .expect("write response");
+            }
+        });
+
+        let client = reqwest::Client::builder()
+            .user_agent("test")
+            .build()
+            .expect("client");
+        upsert_inline_comments_at(
+            &client,
+            &format!("http://{address}"),
+            "token",
+            "owner",
+            "repo",
+            7,
+            "abc123",
+            "team",
+            &[],
+        )
+        .await
+        .expect("remove stale comment");
         server.await.expect("server task");
     }
 }

@@ -441,11 +441,7 @@ async fn post_confirmed_inline(
         })
         .collect();
 
-    if inline.is_empty() {
-        return Ok(());
-    }
-
-    println!("Posting {} confirmed inline comment(s)…", inline.len());
+    println!("Upserting {} confirmed inline comment(s)…", inline.len());
     github::upsert_inline_comments(
         &clients.github_token,
         owner,
