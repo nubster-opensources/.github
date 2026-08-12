@@ -266,6 +266,7 @@ pub enum Verdict {
     Ship,
     NeedsWork,
     Discuss,
+    Incomplete,
 }
 
 /// Default severity for a finding whose severity field is missing or unparseable.

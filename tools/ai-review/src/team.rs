@@ -35,7 +35,16 @@ pub async fn run_team(
     println!("Fetching PR #{pr_number} diff for team review…");
     let mut ctx = github::fetch_diff_context(&clients.octo, owner, repo, pr_number).await?;
     if ctx.full.trim().is_empty() {
-        println!("Empty diff: nothing to review.");
+        if ctx.coverage_gaps.is_empty() {
+            println!("Empty diff: nothing to review.");
+        } else {
+            let body = review::render_incomplete_team_comment(
+                "no textual patch was available for review",
+                &ctx.coverage_gaps,
+            );
+            github::upsert_global_comment(&clients.octo, owner, repo, pr_number, &body, MARKER)
+                .await?;
+        }
         return Ok(());
     }
 
@@ -43,19 +52,12 @@ pub async fn run_team(
         run_batch_plan(clients, &ctx.batches).await;
     ctx.coverage_gaps.extend(agent_gaps);
     if batch_runs.iter().all(|run| run.reports.is_empty()) {
-        let gaps = ctx
-            .coverage_gaps
-            .iter()
-            .map(|gap| format!("- `{}`: {} ({:?})", gap.file, gap.detail, gap.kind))
-            .collect::<Vec<_>>()
-            .join("\n");
         let reason = if ctx.batches.is_empty() {
             "no textual patch could be placed in a review batch"
         } else {
             "all specialist agents failed"
         };
-        let body =
-            format!("{MARKER}\n## Team Review\n\n⚠️ Team review unavailable: {reason}.\n\n{gaps}");
+        let body = review::render_incomplete_team_comment(reason, &ctx.coverage_gaps);
         github::upsert_global_comment(&clients.octo, owner, repo, pr_number, &body, MARKER).await?;
         return Ok(());
     }
@@ -65,16 +67,16 @@ pub async fn run_team(
         .flat_map(|run| &run.reports)
         .map(|(_, report)| report.findings.len())
         .sum();
-    let (mut synth, synthesis_gaps) = synthesize_batches(clients, &batch_runs).await;
+    let (synth, synthesis_gaps) = synthesize_batches(clients, &batch_runs).await;
     ctx.coverage_gaps.extend(synthesis_gaps);
-    if synth.is_none() {
-        let body = format!(
-            "{MARKER}\n## Team Review\n\n⚠️ Team review unavailable: every batch synthesis failed."
+    let Some(mut synth) = synth else {
+        let body = review::render_incomplete_team_comment(
+            "every batch synthesis failed",
+            &ctx.coverage_gaps,
         );
         github::upsert_global_comment(&clients.octo, owner, repo, pr_number, &body, MARKER).await?;
         return Ok(());
-    }
-    let mut synth = synth.take().expect("checked above");
+    };
 
     let mut findings = std::mem::take(&mut synth.findings);
     findings.sort_by_key(|f| severity_rank(&f.severity));
@@ -96,7 +98,7 @@ pub async fn run_team(
     );
     let verdicts = verify_findings(clients, &ctx, &findings).await;
     let scored: Vec<(SynthFinding, FindingVerdict)> = findings.into_iter().zip(verdicts).collect();
-    let verdict = compute_verdict(&scored);
+    let verdict = compute_verdict(&scored, capped > 0 || !ctx.coverage_gaps.is_empty());
 
     let model = format!(
         "{} + {}",
@@ -439,17 +441,14 @@ async fn post_confirmed_inline(
         })
         .collect();
 
-    if inline.is_empty() {
-        return Ok(());
-    }
-
-    println!("Posting {} confirmed inline comment(s)…", inline.len());
-    github::post_inline_comments(
+    println!("Upserting {} confirmed inline comment(s)…", inline.len());
+    github::upsert_inline_comments(
         &clients.github_token,
         owner,
         repo,
         pr_number,
         head_sha,
+        MARKER,
         &inline,
     )
     .await
@@ -500,15 +499,22 @@ pub fn aggregate_lens_votes(votes: &[LensVerdict]) -> FindingVerdict {
     }
 }
 
-/// Computes the overall verdict deterministically: a confirmed critical blocks,
-/// an only-contested critical invites discussion, otherwise the PR may ship.
+/// Computes the overall verdict deterministically. A confirmed critical always
+/// blocks. Without one, incomplete coverage prevents a ship/discuss conclusion;
+/// otherwise a contested critical invites discussion and the remaining cases ship.
 #[must_use]
-pub fn compute_verdict(scored: &[(SynthFinding, FindingVerdict)]) -> Verdict {
+pub fn compute_verdict(
+    scored: &[(SynthFinding, FindingVerdict)],
+    incomplete_coverage: bool,
+) -> Verdict {
     let confirmed_critical = scored
         .iter()
         .any(|(f, v)| f.severity == Severity::Critical && !v.contested);
     if confirmed_critical {
         return Verdict::NeedsWork;
+    }
+    if incomplete_coverage {
+        return Verdict::Incomplete;
     }
     let contested_critical = scored
         .iter()
@@ -628,7 +634,7 @@ mod tests {
     #[test]
     fn verdict_needs_work_on_confirmed_critical() {
         let scored = vec![(finding(Severity::Critical), verdict(false))];
-        assert_eq!(compute_verdict(&scored), Verdict::NeedsWork);
+        assert_eq!(compute_verdict(&scored, false), Verdict::NeedsWork);
     }
 
     #[test]
@@ -637,14 +643,27 @@ mod tests {
             (finding(Severity::Critical), verdict(true)),
             (finding(Severity::Minor), verdict(false)),
         ];
-        assert_eq!(compute_verdict(&scored), Verdict::Discuss);
+        assert_eq!(compute_verdict(&scored, false), Verdict::Discuss);
     }
 
     #[test]
     fn verdict_ship_without_criticals() {
         let scored = vec![(finding(Severity::Minor), verdict(false))];
-        assert_eq!(compute_verdict(&scored), Verdict::Ship);
-        assert_eq!(compute_verdict(&[]), Verdict::Ship);
+        assert_eq!(compute_verdict(&scored, false), Verdict::Ship);
+        assert_eq!(compute_verdict(&[], false), Verdict::Ship);
+    }
+
+    #[test]
+    fn verdict_incomplete_when_coverage_has_gaps_or_findings_are_capped() {
+        let scored = vec![(finding(Severity::Minor), verdict(false))];
+        assert_eq!(compute_verdict(&scored, true), Verdict::Incomplete);
+        assert_eq!(compute_verdict(&[], true), Verdict::Incomplete);
+    }
+
+    #[test]
+    fn confirmed_critical_takes_precedence_over_incomplete_coverage() {
+        let scored = vec![(finding(Severity::Critical), verdict(false))];
+        assert_eq!(compute_verdict(&scored, true), Verdict::NeedsWork);
     }
 
     fn finding_in_file(file: &str, line: u32) -> SynthFinding {

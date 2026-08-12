@@ -1,6 +1,6 @@
 #![allow(clippy::missing_errors_doc)]
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::Write as _;
 
 use anyhow::Context;
@@ -375,14 +375,19 @@ pub async fn upsert_global_comment(
     body: &str,
     marker: &str,
 ) -> anyhow::Result<()> {
-    let comments = octo
+    let first_page = octo
         .issues(owner, repo)
         .list_comments(pr_number)
+        .per_page(100)
         .send()
         .await
         .context("failed to list PR comments")?;
+    let comments = octo
+        .all_pages(first_page)
+        .await
+        .context("failed to fetch every PR comment page")?;
 
-    let existing_id = comments.items.iter().find_map(|c| {
+    let existing_id = comments.iter().find_map(|c| {
         c.body
             .as_deref()
             .filter(|b| has_bot_marker(b, marker))
@@ -420,61 +425,246 @@ struct GhComment<'a> {
     body: &'a str,
 }
 
-/// Post inline review comments for critical findings via GitHub REST API.
+#[derive(Debug)]
+struct PreparedInlineComment {
+    path: String,
+    line: u32,
+    body: String,
+    marker: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ExistingReviewComment {
+    id: u64,
+    #[serde(default)]
+    body: String,
+}
+
+/// Upserts inline review comments for one mode and head commit.
 ///
-/// Falls back silently (warning to stderr) if the review API returns an error.
-pub async fn post_inline_comments(
+/// Findings that share a line are combined into one comment. A stable hidden
+/// marker lets reruns update that comment instead of publishing duplicates.
+pub async fn upsert_inline_comments(
     token: &str,
     owner: &str,
     repo: &str,
     pr_number: u64,
     head_sha: &str,
+    namespace: &str,
     comments: &[InlineComment],
 ) -> anyhow::Result<()> {
-    if comments.is_empty() {
-        return Ok(());
-    }
-
-    let gh_comments: Vec<GhComment<'_>> = comments
-        .iter()
-        .map(|c| GhComment {
-            path: &c.path,
-            line: c.line,
-            side: "RIGHT",
-            body: &c.body,
-        })
-        .collect();
-
-    let request = ReviewRequest {
-        commit_id: head_sha,
-        body: "",
-        event: "COMMENT",
-        comments: gh_comments,
-    };
-
-    let url = format!("https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}/reviews");
-
     let client = reqwest::Client::builder()
         .user_agent("ai-review-bot/0.1")
         .build()?;
+    upsert_inline_comments_at(
+        &client,
+        "https://api.github.com",
+        token,
+        owner,
+        repo,
+        pr_number,
+        head_sha,
+        namespace,
+        comments,
+    )
+    .await
+}
 
-    let resp = client
-        .post(&url)
-        .bearer_auth(token)
-        .header("Accept", "application/vnd.github+json")
-        .header("X-GitHub-Api-Version", "2022-11-28")
-        .json(&request)
-        .send()
-        .await
-        .context("failed to post inline review")?;
+#[allow(clippy::too_many_arguments)]
+async fn upsert_inline_comments_at(
+    client: &reqwest::Client,
+    api_base: &str,
+    token: &str,
+    owner: &str,
+    repo: &str,
+    pr_number: u64,
+    head_sha: &str,
+    namespace: &str,
+    comments: &[InlineComment],
+) -> anyhow::Result<()> {
+    let prepared = prepare_inline_comments(namespace, head_sha, comments);
+    let existing = list_review_comments(client, api_base, token, owner, repo, pr_number).await?;
+    let mut new_comments = Vec::new();
+    let mut retained_existing_ids = HashSet::new();
 
-    let status = resp.status();
-    if !status.is_success() {
-        let body_text = resp.text().await.unwrap_or_default();
-        eprintln!("warning: inline review returned {status}: {body_text}");
+    for comment in &prepared {
+        if let Some(found) = existing
+            .iter()
+            .find(|existing| existing.body.contains(&comment.marker))
+        {
+            retained_existing_ids.insert(found.id);
+            if found.body != comment.body {
+                let url = format!(
+                    "{api_base}/repos/{owner}/{repo}/pulls/comments/{}",
+                    found.id
+                );
+                client
+                    .patch(url)
+                    .bearer_auth(token)
+                    .header("Accept", "application/vnd.github+json")
+                    .header("X-GitHub-Api-Version", "2022-11-28")
+                    .json(&serde_json::json!({ "body": comment.body }))
+                    .send()
+                    .await
+                    .context("failed to update inline review comment")?
+                    .error_for_status()
+                    .context("GitHub rejected inline review comment update")?;
+            }
+        } else {
+            new_comments.push(comment);
+        }
+    }
+
+    if !new_comments.is_empty() {
+        let gh_comments: Vec<GhComment<'_>> = new_comments
+            .iter()
+            .map(|comment| GhComment {
+                path: &comment.path,
+                line: comment.line,
+                side: "RIGHT",
+                body: &comment.body,
+            })
+            .collect();
+        let request = ReviewRequest {
+            commit_id: head_sha,
+            body: "",
+            event: "COMMENT",
+            comments: gh_comments,
+        };
+        let url = format!("{api_base}/repos/{owner}/{repo}/pulls/{pr_number}/reviews");
+
+        client
+            .post(&url)
+            .bearer_auth(token)
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .json(&request)
+            .send()
+            .await
+            .context("failed to post inline review")?
+            .error_for_status()
+            .context("GitHub rejected inline review")?;
+    }
+
+    let scope_prefix = inline_scope_prefix(namespace, head_sha);
+    for stale in existing.iter().filter(|existing| {
+        existing.body.contains(&scope_prefix) && !retained_existing_ids.contains(&existing.id)
+    }) {
+        let url = format!(
+            "{api_base}/repos/{owner}/{repo}/pulls/comments/{}",
+            stale.id
+        );
+        client
+            .delete(url)
+            .bearer_auth(token)
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .send()
+            .await
+            .context("failed to delete stale inline review comment")?
+            .error_for_status()
+            .context("GitHub rejected stale inline review comment deletion")?;
     }
 
     Ok(())
+}
+
+async fn list_review_comments(
+    client: &reqwest::Client,
+    api_base: &str,
+    token: &str,
+    owner: &str,
+    repo: &str,
+    pr_number: u64,
+) -> anyhow::Result<Vec<ExistingReviewComment>> {
+    const PER_PAGE: usize = 100;
+    let url = format!("{api_base}/repos/{owner}/{repo}/pulls/{pr_number}/comments");
+    let mut all = Vec::new();
+    let mut page = 1_u32;
+    loop {
+        let current: Vec<ExistingReviewComment> = client
+            .get(&url)
+            .bearer_auth(token)
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .query(&[("per_page", PER_PAGE), ("page", page as usize)])
+            .send()
+            .await
+            .context("failed to list inline review comments")?
+            .error_for_status()
+            .context("GitHub rejected inline review comment listing")?
+            .json()
+            .await
+            .context("failed to decode inline review comments")?;
+        let is_last = current.len() < PER_PAGE;
+        all.extend(current);
+        if is_last {
+            break;
+        }
+        page = page
+            .checked_add(1)
+            .context("inline review comment pagination overflowed")?;
+    }
+    Ok(all)
+}
+
+fn prepare_inline_comments(
+    namespace: &str,
+    head_sha: &str,
+    comments: &[InlineComment],
+) -> Vec<PreparedInlineComment> {
+    let mut grouped: BTreeMap<(String, u32), Vec<String>> = BTreeMap::new();
+    for comment in comments {
+        grouped
+            .entry((comment.path.clone(), comment.line))
+            .or_default()
+            .push(comment.body.clone());
+    }
+
+    grouped
+        .into_iter()
+        .map(|((path, line), mut bodies)| {
+            bodies.sort();
+            bodies.dedup();
+            let marker = inline_comment_marker(namespace, head_sha, &path, line);
+            PreparedInlineComment {
+                path,
+                line,
+                body: format!("{}\n\n{marker}", bodies.join("\n\n---\n\n")),
+                marker,
+            }
+        })
+        .collect()
+}
+
+fn inline_comment_marker(namespace: &str, head_sha: &str, path: &str, line: u32) -> String {
+    let scope = stable_inline_hash(&[namespace.as_bytes(), head_sha.as_bytes()], None);
+    let location = stable_inline_hash(&[path.as_bytes()], Some(line));
+    format!("<!-- ai-review-inline:{scope:016x}:{location:016x} -->")
+}
+
+fn inline_scope_prefix(namespace: &str, head_sha: &str) -> String {
+    let scope = stable_inline_hash(&[namespace.as_bytes(), head_sha.as_bytes()], None);
+    format!("<!-- ai-review-inline:{scope:016x}:")
+}
+
+fn stable_inline_hash(parts: &[&[u8]], line: Option<u32>) -> u64 {
+    // Stable FNV-1a keeps arbitrary file names out of the HTML marker while
+    // preserving the same identity across binaries and workflow reruns.
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for part in parts {
+        for byte in part.iter().copied().chain(std::iter::once(0)) {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+    if let Some(line) = line {
+        for byte in line.to_le_bytes() {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+    hash
 }
 
 /// Update the PR description body.
@@ -803,5 +993,199 @@ mod tests {
             .insert("a.rs".to_string(), HEAD_FILE.to_string());
         let finding = finding_at("a.rs", 1000);
         assert_eq!(ctx.lens_context(&finding), ctx.patch_for(&finding));
+    }
+
+    #[test]
+    fn prepares_one_stable_inline_comment_per_location() {
+        let comments = vec![
+            InlineComment {
+                path: "src/lib.rs".to_string(),
+                line: 12,
+                body: "second issue".to_string(),
+            },
+            InlineComment {
+                path: "src/lib.rs".to_string(),
+                line: 12,
+                body: "first issue".to_string(),
+            },
+            InlineComment {
+                path: "src/lib.rs".to_string(),
+                line: 12,
+                body: "first issue".to_string(),
+            },
+        ];
+        let prepared = prepare_inline_comments("team", "abc123", &comments);
+        assert_eq!(prepared.len(), 1);
+        assert_eq!(prepared[0].path, "src/lib.rs");
+        assert_eq!(prepared[0].line, 12);
+        assert_eq!(
+            prepared[0].body.matches("first issue").count(),
+            1,
+            "duplicate messages must be collapsed"
+        );
+        assert!(prepared[0]
+            .body
+            .contains("first issue\n\n---\n\nsecond issue"));
+        assert!(prepared[0].body.ends_with(&prepared[0].marker));
+        assert_eq!(
+            prepared[0].marker,
+            inline_comment_marker("team", "abc123", "src/lib.rs", 12)
+        );
+    }
+
+    #[test]
+    fn inline_marker_is_scoped_to_mode_head_and_location() {
+        let marker = inline_comment_marker("team", "abc123", "src/lib.rs", 12);
+        assert_ne!(
+            marker,
+            inline_comment_marker("review", "abc123", "src/lib.rs", 12)
+        );
+        assert_ne!(
+            marker,
+            inline_comment_marker("team", "def456", "src/lib.rs", 12)
+        );
+        assert_ne!(
+            marker,
+            inline_comment_marker("team", "abc123", "src/main.rs", 12)
+        );
+        assert_ne!(
+            marker,
+            inline_comment_marker("team", "abc123", "src/lib.rs", 13)
+        );
+    }
+
+    #[tokio::test]
+    async fn inline_upsert_finds_markers_after_the_first_page_and_updates() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let comment = InlineComment {
+            path: "src/lib.rs".to_string(),
+            line: 12,
+            body: "fresh finding".to_string(),
+        };
+        let marker = inline_comment_marker("team", "abc123", &comment.path, comment.line);
+        let first_page = serde_json::to_string(
+            &(0..100)
+                .map(|id| serde_json::json!({ "id": id, "body": "human comment" }))
+                .collect::<Vec<_>>(),
+        )
+        .expect("first page JSON");
+        let second_page = serde_json::json!([{
+            "id": 4242,
+            "body": format!("stale finding\n\n{marker}")
+        }])
+        .to_string();
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let address = listener.local_addr().expect("address");
+        let server = tokio::spawn(async move {
+            for (index, body) in [first_page, second_page, "{}".to_string()]
+                .into_iter()
+                .enumerate()
+            {
+                let (mut socket, _) = listener.accept().await.expect("accept request");
+                let mut request = vec![0_u8; 16_384];
+                let read = socket.read(&mut request).await.expect("read request");
+                let request = String::from_utf8_lossy(&request[..read]);
+                match index {
+                    0 => assert!(request.starts_with(
+                        "GET /repos/owner/repo/pulls/7/comments?per_page=100&page=1 "
+                    )),
+                    1 => assert!(request.starts_with(
+                        "GET /repos/owner/repo/pulls/7/comments?per_page=100&page=2 "
+                    )),
+                    2 => {
+                        assert!(request.starts_with("PATCH /repos/owner/repo/pulls/comments/4242 "));
+                        assert!(request.contains("fresh finding"));
+                    }
+                    _ => unreachable!(),
+                }
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                socket
+                    .write_all(response.as_bytes())
+                    .await
+                    .expect("write response");
+            }
+        });
+
+        let client = reqwest::Client::builder()
+            .user_agent("test")
+            .build()
+            .expect("client");
+        upsert_inline_comments_at(
+            &client,
+            &format!("http://{address}"),
+            "token",
+            "owner",
+            "repo",
+            7,
+            "abc123",
+            "team",
+            &[comment],
+        )
+        .await
+        .expect("upsert");
+        server.await.expect("server task");
+    }
+
+    #[tokio::test]
+    async fn inline_upsert_deletes_stale_comments_when_no_findings_remain() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let marker = inline_comment_marker("team", "abc123", "src/lib.rs", 12);
+        let existing = serde_json::json!([{
+            "id": 4242,
+            "body": format!("stale finding\n\n{marker}")
+        }])
+        .to_string();
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let address = listener.local_addr().expect("address");
+        let server = tokio::spawn(async move {
+            for (index, body) in [existing, "{}".to_string()].into_iter().enumerate() {
+                let (mut socket, _) = listener.accept().await.expect("accept request");
+                let mut request = vec![0_u8; 4096];
+                let read = socket.read(&mut request).await.expect("read request");
+                let request = String::from_utf8_lossy(&request[..read]);
+                if index == 0 {
+                    assert!(request.starts_with(
+                        "GET /repos/owner/repo/pulls/7/comments?per_page=100&page=1 "
+                    ));
+                } else {
+                    assert!(request.starts_with("DELETE /repos/owner/repo/pulls/comments/4242 "));
+                }
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                socket
+                    .write_all(response.as_bytes())
+                    .await
+                    .expect("write response");
+            }
+        });
+
+        let client = reqwest::Client::builder()
+            .user_agent("test")
+            .build()
+            .expect("client");
+        upsert_inline_comments_at(
+            &client,
+            &format!("http://{address}"),
+            "token",
+            "owner",
+            "repo",
+            7,
+            "abc123",
+            "team",
+            &[],
+        )
+        .await
+        .expect("remove stale comment");
+        server.await.expect("server task");
     }
 }

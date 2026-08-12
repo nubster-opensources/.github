@@ -112,28 +112,27 @@ async fn run_analysis(
         .into_iter()
         .filter(|finding| ctx.line_is_added_at(&finding.file, finding.line) == Some(true))
         .collect();
-    if !inline.is_empty() {
-        let head_sha = github::fetch_head_sha(&clients.octo, owner, repo, pr_number).await?;
-        let comments: Vec<InlineComment> = inline
-            .into_iter()
-            .map(|f| InlineComment {
-                path: f.file.clone(),
-                line: f.line,
-                body: f.message.clone(),
-            })
-            .collect();
+    let head_sha = github::fetch_head_sha(&clients.octo, owner, repo, pr_number).await?;
+    let comments: Vec<InlineComment> = inline
+        .into_iter()
+        .map(|f| InlineComment {
+            path: f.file.clone(),
+            line: f.line,
+            body: f.message.clone(),
+        })
+        .collect();
 
-        println!("Posting {} inline comment(s)…", comments.len());
-        github::post_inline_comments(
-            &clients.github_token,
-            owner,
-            repo,
-            pr_number,
-            &head_sha,
-            &comments,
-        )
-        .await?;
-    }
+    println!("Upserting {} inline comment(s)…", comments.len());
+    github::upsert_inline_comments(
+        &clients.github_token,
+        owner,
+        repo,
+        pr_number,
+        &head_sha,
+        marker,
+        &comments,
+    )
+    .await?;
 
     println!("{label} complete.");
     Ok(())
