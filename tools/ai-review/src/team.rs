@@ -1,6 +1,7 @@
 #![allow(clippy::missing_errors_doc)]
 
 use std::collections::HashSet;
+use std::fmt::Write as _;
 use std::sync::Arc;
 
 use tokio::sync::Semaphore;
@@ -8,7 +9,7 @@ use tokio::task::JoinSet;
 
 use crate::types::{
     Agent, CoverageGap, CoverageGapKind, FindingVerdict, Lens, LensVerdict, Severity, SynthFinding,
-    Verdict,
+    SynthReport, Verdict,
 };
 use crate::{github, mistral, review, Clients};
 
@@ -38,10 +39,10 @@ pub async fn run_team(
         return Ok(());
     }
 
-    let (report_ok, agents_ok, agents_failed, agent_gaps) =
+    let (batch_runs, agents_ok, agents_failed, agent_gaps) =
         run_batch_plan(clients, &ctx.batches).await;
     ctx.coverage_gaps.extend(agent_gaps);
-    if report_ok.is_empty() {
+    if batch_runs.iter().all(|run| run.reports.is_empty()) {
         let gaps = ctx
             .coverage_gaps
             .iter()
@@ -59,10 +60,21 @@ pub async fn run_team(
         return Ok(());
     }
 
-    let raw_count: usize = report_ok.iter().map(|(_, r)| r.findings.len()).sum();
-    println!("Synthesising {} agent report(s)…", report_ok.len());
-    let mut synth =
-        mistral::call_synthesis(&clients.http, &clients.mistral_key, &ctx.full, &report_ok).await?;
+    let raw_count: usize = batch_runs
+        .iter()
+        .flat_map(|run| &run.reports)
+        .map(|(_, report)| report.findings.len())
+        .sum();
+    let (mut synth, synthesis_gaps) = synthesize_batches(clients, &batch_runs).await;
+    ctx.coverage_gaps.extend(synthesis_gaps);
+    if synth.is_none() {
+        let body = format!(
+            "{MARKER}\n## Team Review\n\n⚠️ Team review unavailable: every batch synthesis failed."
+        );
+        github::upsert_global_comment(&clients.octo, owner, repo, pr_number, &body, MARKER).await?;
+        return Ok(());
+    }
+    let mut synth = synth.take().expect("checked above");
 
     let mut findings = std::mem::take(&mut synth.findings);
     findings.sort_by_key(|f| severity_rank(&f.severity));
@@ -120,15 +132,20 @@ pub async fn run_team(
 
 type AgentReports = Vec<(Agent, crate::types::ReviewResponse)>;
 
+struct BatchRun {
+    batch: crate::types::ReviewBatch,
+    reports: AgentReports,
+}
+
 async fn run_batch_plan(
     clients: &Clients,
     batches: &[crate::types::ReviewBatch],
-) -> (AgentReports, Vec<Agent>, Vec<Agent>, Vec<CoverageGap>) {
+) -> (Vec<BatchRun>, Vec<Agent>, Vec<Agent>, Vec<CoverageGap>) {
     println!(
         "Running specialist agents over {} review batch(es)…",
         batches.len()
     );
-    let mut reports = Vec::new();
+    let mut runs = Vec::new();
     let mut ok_set = HashSet::new();
     let mut failed_set = HashSet::new();
     let mut gaps = Vec::new();
@@ -141,7 +158,6 @@ async fn run_batch_plan(
             batch.content.len()
         );
         let (batch_reports, ok, failed) = run_agents(clients, &batch.content).await;
-        reports.extend(batch_reports);
         ok_set.extend(ok);
         for agent in failed {
             failed_set.insert(agent);
@@ -151,6 +167,10 @@ async fn run_batch_plan(
                 detail: format!("{} failed on review batch {}", agent.label(), batch.id),
             });
         }
+        runs.push(BatchRun {
+            batch: batch.clone(),
+            reports: batch_reports,
+        });
     }
     let agents = [
         Agent::Correctness,
@@ -168,7 +188,89 @@ async fn run_batch_plan(
         .copied()
         .filter(|agent| failed_set.contains(agent))
         .collect();
-    (reports, ok, failed, gaps)
+    (runs, ok, failed, gaps)
+}
+
+async fn synthesize_batches(
+    clients: &Clients,
+    runs: &[BatchRun],
+) -> (Option<SynthReport>, Vec<CoverageGap>) {
+    let report_count: usize = runs.iter().map(|run| run.reports.len()).sum();
+    println!(
+        "Synthesising {report_count} agent report(s) across {} batch(es)…",
+        runs.len()
+    );
+    let mut completed = Vec::new();
+    let mut gaps = Vec::new();
+    for run in runs.iter().filter(|run| !run.reports.is_empty()) {
+        match mistral::call_synthesis(
+            &clients.http,
+            &clients.mistral_key,
+            &run.batch.content,
+            &run.reports,
+        )
+        .await
+        {
+            Ok(report) => completed.push((run.batch.id, report)),
+            Err(error) => {
+                eprintln!(
+                    "warning: synthesis failed for review batch {}: {error}",
+                    run.batch.id
+                );
+                gaps.push(CoverageGap {
+                    kind: CoverageGapKind::SynthesisFailed,
+                    file: run.batch.files.join(", "),
+                    detail: format!("synthesis failed on review batch {}", run.batch.id),
+                });
+            }
+        }
+    }
+    (merge_batch_syntheses(completed), gaps)
+}
+
+fn merge_batch_syntheses(reports: Vec<(usize, SynthReport)>) -> Option<SynthReport> {
+    if reports.is_empty() {
+        return None;
+    }
+    if reports.len() == 1 {
+        return reports.into_iter().next().map(|(_, report)| report);
+    }
+
+    let mut merged = SynthReport {
+        executive_summary: String::new(),
+        executive_summary_fr: String::new(),
+        strengths: Vec::new(),
+        strengths_fr: Vec::new(),
+        findings: Vec::new(),
+    };
+    for (batch_id, report) in reports {
+        if !merged.executive_summary.is_empty() {
+            merged.executive_summary.push('\n');
+            merged.executive_summary_fr.push('\n');
+        }
+        let _ = write!(
+            merged.executive_summary,
+            "Batch {batch_id}: {}",
+            report.executive_summary
+        );
+        let _ = write!(
+            merged.executive_summary_fr,
+            "Lot {batch_id} : {}",
+            report.executive_summary_fr
+        );
+        extend_unique(&mut merged.strengths, report.strengths);
+        extend_unique(&mut merged.strengths_fr, report.strengths_fr);
+        merged.findings.extend(report.findings);
+    }
+    Some(merged)
+}
+
+fn extend_unique(target: &mut Vec<String>, values: Vec<String>) {
+    for value in values {
+        if !target.contains(&value) {
+            target.push(value);
+        }
+    }
 }
 
 /// Runs the four specialist agents concurrently, returning the successful
@@ -429,6 +531,35 @@ fn severity_rank(severity: &Severity) -> u8 {
 mod tests {
     use super::*;
     use crate::types::Category;
+
+    fn synth_report(summary: &str, finding: SynthFinding) -> SynthReport {
+        SynthReport {
+            executive_summary: summary.to_string(),
+            executive_summary_fr: format!("fr-{summary}"),
+            strengths: vec![format!("strength-{summary}")],
+            strengths_fr: vec![format!("force-{summary}")],
+            findings: vec![finding],
+        }
+    }
+
+    #[test]
+    fn batch_syntheses_keep_findings_from_every_batch() {
+        let first = finding_in_file("first.rs", 1);
+        let mut second = finding_in_file("second.rs", 200);
+        second.severity = Severity::Critical;
+        let merged = merge_batch_syntheses(vec![
+            (1, synth_report("first", first)),
+            (2, synth_report("second", second)),
+        ])
+        .expect("merged report");
+        assert_eq!(merged.findings.len(), 2);
+        assert!(merged
+            .findings
+            .iter()
+            .any(|finding| finding.file == "second.rs" && finding.severity == Severity::Critical));
+        assert!(merged.executive_summary.contains("Batch 1"));
+        assert!(merged.executive_summary.contains("Batch 2"));
+    }
 
     fn lens_vote(contested: bool) -> LensVerdict {
         LensVerdict {

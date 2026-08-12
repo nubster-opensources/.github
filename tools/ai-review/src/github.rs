@@ -159,8 +159,13 @@ pub async fn fetch_diff_context(
     repo: &str,
     pr_number: u64,
 ) -> anyhow::Result<DiffContext> {
-    let first_page = octo
-        .pulls(owner, repo)
+    let pulls = octo.pulls(owner, repo);
+    let expected_file_count = pulls
+        .get(pr_number)
+        .await
+        .context("failed to get PR file count")?
+        .changed_files;
+    let first_page = pulls
         .list_files(pr_number)
         .await
         .context("failed to list PR files")?;
@@ -169,10 +174,13 @@ pub async fn fetch_diff_context(
         .await
         .context("failed to fetch every PR files page")?;
 
-    build_diff_context(entries)
+    build_diff_context(entries, expected_file_count)
 }
 
-fn build_diff_context(entries: Vec<DiffEntry>) -> anyhow::Result<DiffContext> {
+fn build_diff_context(
+    entries: Vec<DiffEntry>,
+    expected_file_count: Option<u64>,
+) -> anyhow::Result<DiffContext> {
     let mut seen = HashSet::with_capacity(entries.len());
     let mut files = Vec::with_capacity(entries.len());
     for entry in entries {
@@ -185,9 +193,14 @@ fn build_diff_context(entries: Vec<DiffEntry>) -> anyhow::Result<DiffContext> {
         files.push(changed_file(entry));
     }
 
-    let file_count = files.len();
+    let collected_file_count = files.len();
+    let expected_file_count = expected_file_count
+        .map(usize::try_from)
+        .transpose()
+        .context("PR changed_files count does not fit this platform")?;
+    let file_count = expected_file_count.unwrap_or(collected_file_count);
     let mut full = String::new();
-    let mut by_file = HashMap::with_capacity(file_count);
+    let mut by_file = HashMap::with_capacity(collected_file_count);
 
     for file in &files {
         writeln!(full, "--- {}", file.path).unwrap();
@@ -201,7 +214,16 @@ fn build_diff_context(entries: Vec<DiffEntry>) -> anyhow::Result<DiffContext> {
         full.push('\n');
     }
 
-    let plan = build_review_batches(&files, DEFAULT_BATCH_BYTES, DEFAULT_MAX_BATCHES);
+    let mut plan = build_review_batches(&files, DEFAULT_BATCH_BYTES, DEFAULT_MAX_BATCHES);
+    if expected_file_count.is_some_and(|expected| expected != collected_file_count) {
+        plan.gaps.push(CoverageGap {
+            kind: crate::types::CoverageGapKind::GitHubFileListIncomplete,
+            file: "pull request".to_string(),
+            detail: format!(
+                "GitHub reported {file_count} changed files but the files endpoint returned {collected_file_count}; the endpoint is capped at 3,000 files"
+            ),
+        });
+    }
 
     Ok(DiffContext {
         full,
@@ -632,7 +654,7 @@ mod tests {
                 .expect("valid DiffEntry fixture")
             })
             .collect();
-        let ctx = build_diff_context(entries).expect("context");
+        let ctx = build_diff_context(entries, Some(31)).expect("context");
         assert_eq!(ctx.file_count, 31);
         assert_eq!(ctx.files.len(), 31);
         assert_eq!(ctx.by_file.len(), 31);
@@ -667,6 +689,33 @@ mod tests {
         assert!(file.added_lines.is_empty());
     }
 
+    #[test]
+    fn records_a_gap_when_github_returns_fewer_files_than_reported() {
+        let entries: Vec<DiffEntry> = (0..3)
+            .map(|index| {
+                serde_json::from_value(serde_json::json!({
+                    "sha": format!("sha-{index}"),
+                    "filename": format!("file{index}.rs"),
+                    "status": "modified",
+                    "additions": 1,
+                    "deletions": 0,
+                    "changes": 1,
+                    "blob_url": null,
+                    "raw_url": null,
+                    "contents_url": format!("https://api.github.test/file{index}"),
+                    "patch": "@@ -0,0 +1 @@\n+new"
+                }))
+                .expect("valid fixture")
+            })
+            .collect();
+        let ctx = build_diff_context(entries, Some(3_001)).expect("context");
+        assert_eq!(ctx.file_count, 3_001);
+        assert!(ctx.coverage_gaps.iter().any(|gap| {
+            gap.kind == crate::types::CoverageGapKind::GitHubFileListIncomplete
+                && gap.detail.contains("returned 3")
+        }));
+    }
+
     #[tokio::test]
     async fn fetch_diff_context_follows_the_second_github_page() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -689,21 +738,32 @@ mod tests {
 
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let address = listener.local_addr().expect("address");
+        let pr_body = serde_json::json!({
+            "url": format!("http://{address}/repos/owner/repo/pulls/7"),
+            "id": 7,
+            "number": 7,
+            "head": {"ref": "feature", "sha": "head"},
+            "base": {"ref": "main", "sha": "base"},
+            "changed_files": 31
+        })
+        .to_string();
         let first_body = serde_json::to_string(&(0..30).map(entry).collect::<Vec<_>>())
             .expect("first page JSON");
         let second_body = serde_json::to_string(&vec![entry(30)]).expect("second page JSON");
         let server = tokio::spawn(async move {
-            for (index, body) in [first_body, second_body].into_iter().enumerate() {
+            for (index, body) in [pr_body, first_body, second_body].into_iter().enumerate() {
                 let (mut socket, _) = listener.accept().await.expect("accept request");
                 let mut request = vec![0_u8; 4096];
                 let read = socket.read(&mut request).await.expect("read request");
                 let request = String::from_utf8_lossy(&request[..read]);
                 if index == 0 {
+                    assert!(request.starts_with("GET /repos/owner/repo/pulls/7 "));
+                } else if index == 1 {
                     assert!(request.starts_with("GET /repos/owner/repo/pulls/7/files"));
                 } else {
                     assert!(request.starts_with("GET /repos/owner/repo/pulls/7/files?page=2"));
                 }
-                let link = if index == 0 {
+                let link = if index == 1 {
                     format!(
                         "Link: <http://{address}/repos/owner/repo/pulls/7/files?page=2>; rel=\"next\"\r\n"
                     )

@@ -39,9 +39,12 @@ pub struct ChangedFile {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CoverageGapKind {
     PatchUnavailable,
+    MalformedPatch,
     BatchBudgetExceeded,
     OversizedLine,
     AgentFailed,
+    SynthesisFailed,
+    GitHubFileListIncomplete,
 }
 
 /// Explicit accounting for one piece of review input that was not analysed.
