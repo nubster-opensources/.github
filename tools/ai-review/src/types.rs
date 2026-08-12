@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// Normalised status of a file changed by a pull request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -253,7 +253,7 @@ pub struct LensVerdict {
 }
 
 /// Aggregated verdict for one finding after the multi-lens vote.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FindingVerdict {
     pub contested: bool,
     pub reasons: Vec<String>,

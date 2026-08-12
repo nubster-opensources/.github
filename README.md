@@ -39,6 +39,14 @@ takes precedence as `NEEDS_WORK`. Re-running a mode on the same head commit
 updates its global and inline bot comments instead of publishing duplicates,
 and removes inline results that are no longer confirmed by that mode.
 
+Successful `team` reviews also keep a versioned, size-bounded cache in an
+invisible HTML marker owned by the workflow bot. An identical diff reviewed by
+the same workflow revision returns before any Mistral call. When only part of
+the diff changes, unchanged findings reuse their previous three-lens verdict
+only if their exact identity and review context still match. Invalid cache data,
+workflow changes, incomplete model responses, and changed context all fall back
+to fresh verification.
+
 ### Calling the reusable workflow
 
 Default per-PR setup, the multi-agent team review plus the PR description.

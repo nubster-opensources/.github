@@ -11,7 +11,7 @@ use crate::types::{
     Agent, CoverageGap, CoverageGapKind, FindingVerdict, Lens, LensVerdict, Severity, SynthFinding,
     SynthReport, Verdict,
 };
-use crate::{github, mistral, review, Clients};
+use crate::{github, mistral, review, team_cache, Clients};
 
 /// Maximum number of synthesised findings put through adversarial verification.
 const MAX_VERIFIED_FINDINGS: usize = 15;
@@ -45,6 +45,12 @@ pub async fn run_team(
             github::upsert_global_comment(&clients.octo, owner, repo, pr_number, &body, MARKER)
                 .await?;
         }
+        return Ok(());
+    }
+
+    let cache_state = load_team_cache(clients, owner, repo, pr_number, &ctx).await?;
+    if cache_state.matches_run() {
+        println!("Identical diff and reviewer revision: keeping the cached team review.");
         return Ok(());
     }
 
@@ -96,7 +102,10 @@ pub async fn run_team(
         "Verifying {} finding(s) with the 3-lens vote…",
         findings.len()
     );
-    let verdicts = verify_findings(clients, &ctx, &findings).await;
+    let VerificationResults {
+        verdicts,
+        cacheable,
+    } = verify_findings(clients, &ctx, &findings, cache_state.reusable()).await;
     let scored: Vec<(SynthFinding, FindingVerdict)> = findings.into_iter().zip(verdicts).collect();
     let verdict = compute_verdict(&scored, capped > 0 || !ctx.coverage_gaps.is_empty());
 
@@ -121,7 +130,8 @@ pub async fn run_team(
         model: &model,
         coverage_gaps: &ctx.coverage_gaps,
     };
-    let body = review::render_team_comment(&view);
+    let mut body = review::render_team_comment(&view);
+    append_team_cache(&mut body, &cache_state, &ctx, &scored, cacheable)?;
 
     println!("Upserting team comment…");
     github::upsert_global_comment(&clients.octo, owner, repo, pr_number, &body, MARKER).await?;
@@ -129,6 +139,94 @@ pub async fn run_team(
     post_confirmed_inline(clients, owner, repo, pr_number, &head_sha, &ctx, &scored).await?;
 
     println!("Team review complete.");
+    Ok(())
+}
+
+struct TeamCacheState {
+    reviewer_revision: Option<String>,
+    trusted_author_configured: bool,
+    diff_hash: String,
+    previous: Option<team_cache::ReviewCache>,
+}
+
+impl TeamCacheState {
+    fn matches_run(&self) -> bool {
+        match (&self.reviewer_revision, &self.previous) {
+            (Some(revision), Some(cache)) => cache.matches_run(revision, &self.diff_hash),
+            _ => false,
+        }
+    }
+
+    fn reusable(&self) -> Option<&team_cache::ReviewCache> {
+        match (&self.reviewer_revision, &self.previous) {
+            (Some(revision), Some(cache)) if cache.supports_revision(revision) => Some(cache),
+            _ => None,
+        }
+    }
+}
+
+async fn load_team_cache(
+    clients: &Clients,
+    owner: &str,
+    repo: &str,
+    pr_number: u64,
+    ctx: &github::DiffContext,
+) -> anyhow::Result<TeamCacheState> {
+    let reviewer_revision = std::env::var("AI_REVIEW_REVISION")
+        .ok()
+        .filter(|revision| !revision.trim().is_empty());
+    let comment_author = std::env::var("AI_REVIEW_COMMENT_AUTHOR")
+        .ok()
+        .filter(|author| !author.trim().is_empty());
+    let existing_comment = if let Some(author) = comment_author.as_deref() {
+        github::fetch_global_comment(&clients.octo, owner, repo, pr_number, MARKER, author).await?
+    } else {
+        None
+    };
+    let previous = existing_comment.as_deref().and_then(|body| {
+        match team_cache::ReviewCache::from_comment(body) {
+            Ok(cache) => cache,
+            Err(error) => {
+                eprintln!("warning: ignoring invalid team cache: {error}");
+                None
+            }
+        }
+    });
+    Ok(TeamCacheState {
+        reviewer_revision,
+        trusted_author_configured: comment_author.is_some(),
+        diff_hash: team_cache::diff_hash(ctx),
+        previous,
+    })
+}
+
+fn append_team_cache(
+    body: &mut String,
+    state: &TeamCacheState,
+    ctx: &github::DiffContext,
+    scored: &[(SynthFinding, FindingVerdict)],
+    cacheable: Vec<bool>,
+) -> anyhow::Result<()> {
+    let complete = !has_transient_coverage_gap(ctx) && cacheable.iter().all(|value| *value);
+    if let Some(revision) = state
+        .reviewer_revision
+        .as_deref()
+        .filter(|_| state.trusted_author_configured && complete)
+    {
+        let mut cache = team_cache::ReviewCache::new(revision, state.diff_hash.clone());
+        for ((finding, finding_verdict), is_cacheable) in scored.iter().zip(cacheable) {
+            if is_cacheable {
+                cache.record(ctx, finding, finding_verdict);
+            }
+        }
+        *body = team_cache::append_marker(body, &cache.encode_bounded()?);
+    } else if state.reviewer_revision.is_some() && state.trusted_author_configured {
+        eprintln!("warning: incomplete verification detected; team cache was not updated");
+    } else {
+        eprintln!(
+            "warning: AI_REVIEW_REVISION or AI_REVIEW_COMMENT_AUTHOR is unset; team caching is disabled"
+        );
+    }
     Ok(())
 }
 
@@ -355,18 +453,59 @@ fn prefilter_verdict(ctx: &github::DiffContext, finding: &SynthFinding) -> Optio
 /// Verifies each finding with the 3-lens adversarial vote under a concurrency
 /// bound, returning one [`FindingVerdict`] per finding (index-aligned).
 /// Findings contested by the deterministic prefilter skip the vote.
+struct VerificationResults {
+    verdicts: Vec<FindingVerdict>,
+    cacheable: Vec<bool>,
+}
+
+struct PrefilledVerdicts {
+    verdicts: Vec<Option<FindingVerdict>>,
+    deterministic_count: usize,
+    cache_hit_count: usize,
+}
+
+fn prefill_verdicts(
+    ctx: &github::DiffContext,
+    findings: &[SynthFinding],
+    previous_cache: Option<&team_cache::ReviewCache>,
+) -> PrefilledVerdicts {
+    let mut verdicts = Vec::with_capacity(findings.len());
+    let mut deterministic_count = 0;
+    let mut cache_hit_count = 0;
+    for finding in findings {
+        if let Some(verdict) = prefilter_verdict(ctx, finding) {
+            deterministic_count += 1;
+            verdicts.push(Some(verdict));
+        } else if let Some(verdict) = previous_cache.and_then(|cache| cache.lookup(ctx, finding)) {
+            cache_hit_count += 1;
+            verdicts.push(Some(verdict));
+        } else {
+            verdicts.push(None);
+        }
+    }
+    PrefilledVerdicts {
+        verdicts,
+        deterministic_count,
+        cache_hit_count,
+    }
+}
+
 async fn verify_findings(
     clients: &Clients,
     ctx: &github::DiffContext,
     findings: &[SynthFinding],
-) -> Vec<FindingVerdict> {
-    let prefilled: Vec<Option<FindingVerdict>> = findings
-        .iter()
-        .map(|finding| prefilter_verdict(ctx, finding))
-        .collect();
-    let skipped = prefilled.iter().filter(|slot| slot.is_some()).count();
-    if skipped > 0 {
-        println!("Prefiltered {skipped} finding(s) outside the diff (no lens calls).");
+    previous_cache: Option<&team_cache::ReviewCache>,
+) -> VerificationResults {
+    let PrefilledVerdicts {
+        verdicts: prefilled,
+        deterministic_count,
+        cache_hit_count,
+    } = prefill_verdicts(ctx, findings, previous_cache);
+    if deterministic_count > 0 {
+        println!("Prefiltered {deterministic_count} finding(s) outside the diff (no lens calls).");
+    }
+    if cache_hit_count > 0 {
+        println!("Reused {cache_hit_count} cached finding verdict(s) (no lens calls).");
     }
 
     let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_CALLS));
@@ -406,11 +545,29 @@ async fn verify_findings(
         }
     }
 
-    prefilled
+    let cacheable = prefilled
+        .iter()
+        .enumerate()
+        .map(|(idx, pre)| pre.is_some() || votes[idx].len() >= MIN_CONFIRM_VOTES)
+        .collect();
+    let verdicts = prefilled
         .into_iter()
         .enumerate()
         .map(|(idx, pre)| pre.unwrap_or_else(|| aggregate_lens_votes(&votes[idx])))
-        .collect()
+        .collect();
+    VerificationResults {
+        verdicts,
+        cacheable,
+    }
+}
+
+fn has_transient_coverage_gap(ctx: &github::DiffContext) -> bool {
+    ctx.coverage_gaps.iter().any(|gap| {
+        matches!(
+            gap.kind,
+            CoverageGapKind::AgentFailed | CoverageGapKind::SynthesisFailed
+        )
+    })
 }
 
 /// Posts inline comments for confirmed, critical, line-located findings.
@@ -716,5 +873,36 @@ mod tests {
         assert!(prefilter_verdict(&ctx, &finding_in_file("a.rs", 2)).is_none());
         assert!(prefilter_verdict(&ctx, &finding_in_file("a.rs", 0)).is_none());
         assert!(prefilter_verdict(&ctx, &finding_in_file("other.rs", 50)).is_none());
+    }
+
+    #[test]
+    fn unchanged_finding_context_is_prefilled_from_cache() {
+        let ctx = diff_ctx("a.rs", ONE_HUNK_PATCH);
+        let finding = finding_in_file("a.rs", 0);
+        let cached_verdict = verdict(false);
+        let mut cache = team_cache::ReviewCache::new("revision", team_cache::diff_hash(&ctx));
+        cache.record(&ctx, &finding, &cached_verdict);
+
+        let hit = prefill_verdicts(&ctx, std::slice::from_ref(&finding), Some(&cache));
+        assert_eq!(hit.cache_hit_count, 1);
+        assert_eq!(hit.deterministic_count, 0);
+        assert_eq!(hit.verdicts, vec![Some(cached_verdict)]);
+
+        let changed = diff_ctx("a.rs", "@@ -1,2 +1,3 @@\n fn main() {\n+    changed();\n }");
+        let miss = prefill_verdicts(&changed, &[finding], Some(&cache));
+        assert_eq!(miss.cache_hit_count, 0);
+        assert_eq!(miss.verdicts, vec![None]);
+    }
+
+    #[test]
+    fn transient_model_gaps_prevent_whole_run_caching() {
+        let mut ctx = diff_ctx("a.rs", ONE_HUNK_PATCH);
+        assert!(!has_transient_coverage_gap(&ctx));
+        ctx.coverage_gaps.push(CoverageGap {
+            kind: CoverageGapKind::AgentFailed,
+            file: "a.rs".to_string(),
+            detail: "temporary failure".to_string(),
+        });
+        assert!(has_transient_coverage_gap(&ctx));
     }
 }
