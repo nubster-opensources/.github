@@ -26,7 +26,9 @@ reusable workflow forwards from its `mode` input.
 
 Default per-PR setup, the multi-agent team review plus the PR description.
 The `permissions` block is required: a reusable workflow cannot escalate
-beyond the ceiling set by its caller.
+beyond the ceiling set by its caller. Pin the reusable workflow to a reviewed
+commit SHA. Pull requests from forks and Dependabot do not receive the Mistral
+secret, so the jobs skip them explicitly.
 
 ```yaml
 on:
@@ -38,9 +40,14 @@ permissions:
   contents: read
   pull-requests: write
 
+concurrency:
+  group: ai-review-${{ github.repository }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 jobs:
   team:
-    uses: nubster-opensources/.github/.github/workflows/ai-review.yml@main
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    uses: nubster-opensources/.github/.github/workflows/ai-review.yml@<reviewed-commit-sha>
     with:
       pr-number: ${{ github.event.pull_request.number }}
       mode: team
@@ -48,7 +55,8 @@ jobs:
       mistral-api-key: ${{ secrets.MISTRAL_API_KEY }}
 
   describe:
-    uses: nubster-opensources/.github/.github/workflows/ai-review.yml@main
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    uses: nubster-opensources/.github/.github/workflows/ai-review.yml@<reviewed-commit-sha>
     with:
       pr-number: ${{ github.event.pull_request.number }}
       mode: describe

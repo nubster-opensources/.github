@@ -12,26 +12,44 @@ on:
         default: review
     secrets:
       mistral-api-key:
-        required: true
+        required: false
 
 jobs:
   ai-review:
+    if: >-
+      github.event_name != 'pull_request' ||
+      (github.event.pull_request.head.repo.full_name == github.repository &&
+      github.actor != 'dependabot[bot]')
     runs-on: ubuntu-latest
+    concurrency:
+      group: ai-review-${{ github.repository }}-${{ inputs.pr-number }}-${{ inputs.mode }}
+      cancel-in-progress: true
     permissions:
       contents: read
       pull-requests: write
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          repository: nubster-opensources/.github
-          ref: main
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
 
-      - uses: dtolnay/rust-toolchain@v1
+      - name: Record reviewer provenance
+        env:
+          REVIEW_WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
+          REVIEW_WORKFLOW_SHA: ${{ job.workflow_sha }}
+        run: |
+          {
+            echo "### Review workflow provenance"
+            echo "- Repository: \`$REVIEW_WORKFLOW_REPOSITORY\`"
+            echo "- Commit: \`$REVIEW_WORKFLOW_SHA\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
           toolchain: "1.88.0"
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
         with:
           workspaces: "."
 
@@ -46,3 +64,20 @@ jobs:
           PR_NUMBER: ${{ inputs.pr-number }}
           AI_MODE: ${{ inputs.mode }}
         run: ./target/release/ai-review
+
+  ai-review-skipped:
+    if: >-
+      github.event_name == 'pull_request' &&
+      (github.event.pull_request.head.repo.full_name != github.repository ||
+      github.actor == 'dependabot[bot]')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Explain why the review was skipped
+        run: |
+          {
+            echo "### AI review skipped"
+            echo "Mistral credentials are unavailable to fork and Dependabot pull requests."
+            echo "A maintainer may run the review after moving the change to a trusted branch."
+          } >> "$GITHUB_STEP_SUMMARY"
