@@ -91,3 +91,28 @@ jobs:
 
 Any other mode (`review`, `security`, `architecture`, `performance`,
 `product`) can be invoked the same way by passing it as the `mode` input.
+
+### Dependency resolution and MSRV
+
+The review tool currently supports Rust 1.88, as declared by its package and
+verified by CI. Cargo is configured to prefer dependency versions compatible
+with that declaration during updates. The blocked Octocrab 0.54.1 proposal
+introduced this build dependency chain:
+
+```text
+octocrab 0.54.1
+└── cargo_metadata 0.23.1
+    └── cargo-platform 0.3.3 (MSRV 1.91)
+```
+
+Cargo can select `cargo-platform` 0.3.2 for Rust 1.88, but Octocrab 0.48 and
+later also require `jsonwebtoken` 10 and a JWT crypto backend even though this
+tool authenticates with the workflow token and never signs GitHub App JWTs.
+RustCrypto introduces the unpatched RUSTSEC-2023-0071 advisory; AWS-LC requires
+an additional native toolchain and fails a clean Windows build without NASM.
+
+Octocrab 0.47.1 is therefore the newest acceptable target. It retains
+`jsonwebtoken` 9, supports Rust 1.73, and builds without either extra JWT
+backend. Default features are disabled, leaving only the HTTP client, Rustls,
+and request timeouts. Raising the fleet MSRV is a separate policy decision
+tracked in issue #28, not a dependency-update side effect.
