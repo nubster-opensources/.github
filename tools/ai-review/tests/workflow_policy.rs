@@ -85,3 +85,16 @@ fn documented_caller_is_safe_for_forks_and_stale_runs() {
     assert!(readme.contains("@<reviewed-commit-sha>"));
     assert!(!readme.contains("ai-review.yml@main"));
 }
+
+#[test]
+fn dependency_updates_respect_the_declared_msrv() {
+    let cargo_config = read_repository_file(".cargo/config.toml");
+    let manifest = read_repository_file("tools/ai-review/Cargo.toml");
+
+    assert!(cargo_config.contains("incompatible-rust-versions = \"fallback\""));
+    assert!(manifest.contains("rust-version = \"1.88\""));
+    assert!(manifest.contains("octocrab   = { version = \"0.47\""));
+    assert!(manifest.contains("default-features = false"));
+    assert!(!manifest.contains("jwt-rust-crypto"));
+    assert!(!manifest.contains("jwt-aws-lc-rs"));
+}
