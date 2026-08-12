@@ -1,4 +1,64 @@
+use std::collections::BTreeSet;
+
 use serde::Deserialize;
+
+/// Normalised status of a file changed by a pull request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChangedFileStatus {
+    Added,
+    Removed,
+    Modified,
+    Renamed,
+    Copied,
+    Changed,
+    Unchanged,
+}
+
+/// Availability of the textual patch returned by GitHub.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PatchAvailability {
+    Present(String),
+    /// GitHub did not provide a patch and did not expose enough metadata to
+    /// distinguish a large/truncated file from another unsupported patch.
+    Missing,
+}
+
+/// One changed file with the metadata required to account for review coverage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChangedFile {
+    pub path: String,
+    pub status: ChangedFileStatus,
+    pub previous_path: Option<String>,
+    pub additions: u64,
+    pub deletions: u64,
+    pub patch: PatchAvailability,
+    pub added_lines: BTreeSet<u32>,
+}
+
+/// Reason why part of a pull request could not be put in a model batch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoverageGapKind {
+    PatchUnavailable,
+    BatchBudgetExceeded,
+    OversizedLine,
+    AgentFailed,
+}
+
+/// Explicit accounting for one piece of review input that was not analysed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoverageGap {
+    pub kind: CoverageGapKind,
+    pub file: String,
+    pub detail: String,
+}
+
+/// A bounded model input assembled from complete file/hunk units.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewBatch {
+    pub id: usize,
+    pub content: String,
+    pub files: Vec<String>,
+}
 
 #[derive(Debug, Deserialize, Clone, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -82,7 +142,7 @@ impl Mode {
 }
 
 /// One of the four specialised review angles run in parallel in team mode.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Agent {
     Correctness,
     Security,

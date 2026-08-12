@@ -1,7 +1,7 @@
 use std::fmt::Write as _;
 
 use crate::types::{
-    Agent, Finding, FindingVerdict, ReviewResponse, Severity, SynthFinding, Verdict,
+    Agent, CoverageGap, Finding, FindingVerdict, ReviewResponse, Severity, SynthFinding, Verdict,
 };
 
 /// Findings that become inline PR comments: critical severity AND specific line.
@@ -85,6 +85,7 @@ pub struct TeamCommentView<'a> {
     pub dedup_count: usize,
     pub capped: usize,
     pub model: &'a str,
+    pub coverage_gaps: &'a [CoverageGap],
 }
 
 /// Language of a rendered report block.
@@ -162,6 +163,18 @@ pub fn render_team_comment(view: &TeamCommentView) -> String {
         md,
         "**Verdict: {verdict_badge}** · {confirmed_count} confirmed · {contested_count} contested\n"
     );
+
+    if !view.coverage_gaps.is_empty() {
+        let _ = writeln!(
+            md,
+            "⚠️ **Partial review coverage:** {} input gap(s) were recorded.",
+            view.coverage_gaps.len()
+        );
+        for gap in view.coverage_gaps {
+            let _ = writeln!(md, "- `{}`: {} ({:?})", gap.file, gap.detail, gap.kind);
+        }
+        md.push('\n');
+    }
 
     md.push_str(&render_lang_block(view, Lang::En));
     md.push_str(&render_lang_block(view, Lang::Fr));
@@ -479,6 +492,7 @@ mod tests {
             dedup_count: 3,
             capped: 0,
             model: "codestral-latest + mistral-large-latest",
+            coverage_gaps: &[],
         };
         let md = render_team_comment(&view);
 
@@ -518,11 +532,41 @@ mod tests {
             dedup_count: 0,
             capped: 0,
             model: "codestral-latest + mistral-large-latest",
+            coverage_gaps: &[],
         };
         let md = render_team_comment(&view);
         assert!(md.contains("0 confirmed"));
         assert!(md.contains("No issues reported by the agents."));
         assert!(md.contains("Aucun problème remonté par les agents."));
         assert!(md.contains("<details><summary>🇬🇧 English</summary>\n\n"));
+    }
+
+    #[test]
+    fn renders_explicit_partial_coverage_gaps() {
+        let gaps = [CoverageGap {
+            kind: crate::types::CoverageGapKind::PatchUnavailable,
+            file: "asset.bin".to_string(),
+            detail: "GitHub did not provide a textual patch".to_string(),
+        }];
+        let view = TeamCommentView {
+            executive_summary: "No text to inspect.",
+            executive_summary_fr: "Aucun texte a inspecter.",
+            strengths: &[],
+            strengths_fr: &[],
+            scored: &[],
+            verdict: Verdict::Ship,
+            file_count: 1,
+            agents_ok: &[],
+            agents_failed: &[],
+            raw_count: 0,
+            dedup_count: 0,
+            capped: 0,
+            model: "test",
+            coverage_gaps: &gaps,
+        };
+        let md = render_team_comment(&view);
+        assert!(md.contains("Partial review coverage"));
+        assert!(md.contains("`asset.bin`"));
+        assert!(md.contains("PatchUnavailable"));
     }
 }

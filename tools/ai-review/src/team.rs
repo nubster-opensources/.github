@@ -1,11 +1,15 @@
 #![allow(clippy::missing_errors_doc)]
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
-use crate::types::{Agent, FindingVerdict, Lens, LensVerdict, Severity, SynthFinding, Verdict};
+use crate::types::{
+    Agent, CoverageGap, CoverageGapKind, FindingVerdict, Lens, LensVerdict, Severity, SynthFinding,
+    Verdict,
+};
 use crate::{github, mistral, review, Clients};
 
 /// Maximum number of synthesised findings put through adversarial verification.
@@ -34,12 +38,23 @@ pub async fn run_team(
         return Ok(());
     }
 
-    println!("Running specialist agents…");
-    let (report_ok, agents_ok, agents_failed) = run_agents(clients, &ctx.full).await;
+    let (report_ok, agents_ok, agents_failed, agent_gaps) =
+        run_batch_plan(clients, &ctx.batches).await;
+    ctx.coverage_gaps.extend(agent_gaps);
     if report_ok.is_empty() {
-        let body = format!(
-            "{MARKER}\n## Team Review\n\n⚠️ Team review unavailable: all specialist agents failed."
-        );
+        let gaps = ctx
+            .coverage_gaps
+            .iter()
+            .map(|gap| format!("- `{}`: {} ({:?})", gap.file, gap.detail, gap.kind))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let reason = if ctx.batches.is_empty() {
+            "no textual patch could be placed in a review batch"
+        } else {
+            "all specialist agents failed"
+        };
+        let body =
+            format!("{MARKER}\n## Team Review\n\n⚠️ Team review unavailable: {reason}.\n\n{gaps}");
         github::upsert_global_comment(&clients.octo, owner, repo, pr_number, &body, MARKER).await?;
         return Ok(());
     }
@@ -90,16 +105,70 @@ pub async fn run_team(
         dedup_count,
         capped,
         model: &model,
+        coverage_gaps: &ctx.coverage_gaps,
     };
     let body = review::render_team_comment(&view);
 
     println!("Upserting team comment…");
     github::upsert_global_comment(&clients.octo, owner, repo, pr_number, &body, MARKER).await?;
 
-    post_confirmed_inline(clients, owner, repo, pr_number, &head_sha, &scored).await?;
+    post_confirmed_inline(clients, owner, repo, pr_number, &head_sha, &ctx, &scored).await?;
 
     println!("Team review complete.");
     Ok(())
+}
+
+type AgentReports = Vec<(Agent, crate::types::ReviewResponse)>;
+
+async fn run_batch_plan(
+    clients: &Clients,
+    batches: &[crate::types::ReviewBatch],
+) -> (AgentReports, Vec<Agent>, Vec<Agent>, Vec<CoverageGap>) {
+    println!(
+        "Running specialist agents over {} review batch(es)…",
+        batches.len()
+    );
+    let mut reports = Vec::new();
+    let mut ok_set = HashSet::new();
+    let mut failed_set = HashSet::new();
+    let mut gaps = Vec::new();
+    for batch in batches {
+        println!(
+            "Running batch {}/{} ({} file(s), {} bytes)…",
+            batch.id,
+            batches.len(),
+            batch.files.len(),
+            batch.content.len()
+        );
+        let (batch_reports, ok, failed) = run_agents(clients, &batch.content).await;
+        reports.extend(batch_reports);
+        ok_set.extend(ok);
+        for agent in failed {
+            failed_set.insert(agent);
+            gaps.push(CoverageGap {
+                kind: CoverageGapKind::AgentFailed,
+                file: batch.files.join(", "),
+                detail: format!("{} failed on review batch {}", agent.label(), batch.id),
+            });
+        }
+    }
+    let agents = [
+        Agent::Correctness,
+        Agent::Security,
+        Agent::Architecture,
+        Agent::Performance,
+    ];
+    let ok = agents
+        .iter()
+        .copied()
+        .filter(|agent| ok_set.contains(agent))
+        .collect();
+    let failed = agents
+        .iter()
+        .copied()
+        .filter(|agent| failed_set.contains(agent))
+        .collect();
+    (reports, ok, failed, gaps)
 }
 
 /// Runs the four specialist agents concurrently, returning the successful
@@ -163,7 +232,7 @@ async fn run_agents(
 /// without a line, without a per-file patch, or anchored inside a hunk range
 /// are left to the lens vote.
 fn prefilter_verdict(ctx: &github::DiffContext, finding: &SynthFinding) -> Option<FindingVerdict> {
-    if ctx.line_in_patch(finding) == Some(false) {
+    if ctx.line_is_added(finding) == Some(false) {
         return Some(FindingVerdict {
             contested: true,
             reasons: vec![format!(
@@ -249,11 +318,14 @@ async fn post_confirmed_inline(
     repo: &str,
     pr_number: u64,
     head_sha: &str,
+    ctx: &github::DiffContext,
     scored: &[(SynthFinding, FindingVerdict)],
 ) -> anyhow::Result<()> {
     let inline: Vec<github::InlineComment> = scored
         .iter()
-        .filter(|(f, v)| f.severity == Severity::Critical && !v.contested && f.line > 0)
+        .filter(|(f, v)| {
+            f.severity == Severity::Critical && !v.contested && ctx.line_is_added(f) == Some(true)
+        })
         .map(|(f, _)| github::InlineComment {
             path: f.file.clone(),
             line: f.line,
@@ -464,6 +536,17 @@ mod tests {
             by_file,
             head_files: std::collections::HashMap::new(),
             file_count: 1,
+            files: vec![crate::types::ChangedFile {
+                path: file.to_string(),
+                status: crate::types::ChangedFileStatus::Modified,
+                previous_path: None,
+                additions: 1,
+                deletions: 0,
+                patch: crate::types::PatchAvailability::Present(patch.to_string()),
+                added_lines: super::github::parse_added_lines(patch),
+            }],
+            batches: vec![],
+            coverage_gaps: vec![],
         }
     }
 

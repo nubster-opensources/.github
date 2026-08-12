@@ -5,10 +5,11 @@ use std::fmt::Write as _;
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
+use crate::text::truncate_utf8;
 use crate::types::{Agent, Lens, LensVerdict, ReviewResponse, Severity, SynthReport};
 
 const API_URL: &str = "https://api.mistral.ai/v1/chat/completions";
-const MAX_DIFF_CHARS: usize = 20_000;
+const MAX_DIFF_BYTES: usize = 20_000;
 
 /// Model used by the four specialist agents in team mode.
 pub(crate) const TEAM_AGENT_MODEL: &str = "codestral-latest";
@@ -608,11 +609,7 @@ pub async fn call_lens(
 }
 
 fn truncate_diff(diff: &str) -> (&str, bool) {
-    if diff.len() <= MAX_DIFF_CHARS {
-        (diff, false)
-    } else {
-        (&diff[..MAX_DIFF_CHARS], true)
-    }
+    truncate_utf8(diff, MAX_DIFF_BYTES)
 }
 
 async fn send_request(
