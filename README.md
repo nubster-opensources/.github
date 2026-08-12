@@ -33,6 +33,10 @@ Oversized hunks receive recalculated old/new coordinates in every fragment,
 and each bounded batch is synthesised independently before reports are joined.
 The collected file count is also checked against the pull request metadata so
 GitHub's 3,000-file endpoint limit cannot look like complete coverage.
+The deterministic team verdict is `INCOMPLETE` whenever any input gap remains
+or the verification cap leaves findings unchecked; a confirmed critical still
+takes precedence as `NEEDS_WORK`. Re-running a mode on the same head commit
+updates its global and inline bot comments instead of publishing duplicates.
 
 ### Calling the reusable workflow
 

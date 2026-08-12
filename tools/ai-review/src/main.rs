@@ -124,12 +124,13 @@ async fn run_analysis(
             .collect();
 
         println!("Posting {} inline comment(s)…", comments.len());
-        github::post_inline_comments(
+        github::upsert_inline_comments(
             &clients.github_token,
             owner,
             repo,
             pr_number,
             &head_sha,
+            marker,
             &comments,
         )
         .await?;

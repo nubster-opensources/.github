@@ -156,6 +156,7 @@ pub fn render_team_comment(view: &TeamCommentView) -> String {
         Verdict::Ship => "SHIP ✅",
         Verdict::NeedsWork => "NEEDS_WORK ⚠️",
         Verdict::Discuss => "DISCUSS 💬",
+        Verdict::Incomplete => "INCOMPLETE ⛔",
     };
 
     let mut md = "<!-- ai-team-bot -->\n## Team Review\n\n".to_string();
@@ -202,6 +203,21 @@ pub fn render_team_comment(view: &TeamCommentView) -> String {
         view.model, view.file_count
     );
 
+    md
+}
+
+/// Renders the fail-closed team result used when no synthesis can be scored.
+#[must_use]
+pub fn render_incomplete_team_comment(reason: &str, coverage_gaps: &[CoverageGap]) -> String {
+    let mut md = "<!-- ai-team-bot -->\n## Team Review\n\n".to_string();
+    md.push_str("**Verdict: INCOMPLETE ⛔**\n\n");
+    let _ = writeln!(md, "⚠️ Team review unavailable: {reason}.");
+    if !coverage_gaps.is_empty() {
+        md.push('\n');
+        for gap in coverage_gaps {
+            let _ = writeln!(md, "- `{}`: {} ({:?})", gap.file, gap.detail, gap.kind);
+        }
+    }
     md
 }
 
@@ -554,7 +570,7 @@ mod tests {
             strengths: &[],
             strengths_fr: &[],
             scored: &[],
-            verdict: Verdict::Ship,
+            verdict: Verdict::Incomplete,
             file_count: 1,
             agents_ok: &[],
             agents_failed: &[],
@@ -566,7 +582,22 @@ mod tests {
         };
         let md = render_team_comment(&view);
         assert!(md.contains("Partial review coverage"));
+        assert!(md.contains("INCOMPLETE"));
         assert!(md.contains("`asset.bin`"));
         assert!(md.contains("PatchUnavailable"));
+    }
+
+    #[test]
+    fn renders_incomplete_when_no_synthesis_is_available() {
+        let gaps = [CoverageGap {
+            kind: crate::types::CoverageGapKind::SynthesisFailed,
+            file: "batch 1".to_string(),
+            detail: "synthesis failed".to_string(),
+        }];
+        let md = render_incomplete_team_comment("every batch synthesis failed", &gaps);
+        assert!(md.starts_with("<!-- ai-team-bot -->"));
+        assert!(md.contains("Verdict: INCOMPLETE"));
+        assert!(md.contains("every batch synthesis failed"));
+        assert!(md.contains("`batch 1`"));
     }
 }
