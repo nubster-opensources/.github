@@ -29,6 +29,11 @@ batch budgets, and specialist failures are listed explicitly as partial
 coverage in the team comment. Line-located findings are accepted only when
 they point to a line actually added by the pull request.
 
+Oversized hunks receive recalculated old/new coordinates in every fragment,
+and each bounded batch is synthesised independently before reports are joined.
+The collected file count is also checked against the pull request metadata so
+GitHub's 3,000-file endpoint limit cannot look like complete coverage.
+
 ### Calling the reusable workflow
 
 Default per-PR setup, the multi-agent team review plus the PR description.

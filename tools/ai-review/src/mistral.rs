@@ -546,9 +546,6 @@ pub async fn call_synthesis(
     diff: &str,
     reports: &[(Agent, ReviewResponse)],
 ) -> anyhow::Result<SynthReport> {
-    let (content, _) = truncate_diff(diff);
-    let agents_block = render_reports_for_synthesis(reports);
-
     let request = ChatRequest {
         model: TEAM_SYNTH_MODEL.to_string(),
         messages: vec![
@@ -558,9 +555,7 @@ pub async fn call_synthesis(
             },
             Message {
                 role: "user".to_string(),
-                content: format!(
-                    "Specialist agent reports for a pull request:\n\n{agents_block}\nThe PR diff under review:\n\n{content}"
-                ),
+                content: synthesis_user_message(diff, reports),
             },
         ],
         response_format: ResponseFormat {
@@ -571,6 +566,13 @@ pub async fn call_synthesis(
 
     let raw = send_request(client, api_key, &request).await?;
     serde_json::from_str(&raw).context("failed to parse Mistral synthesis response")
+}
+
+fn synthesis_user_message(diff: &str, reports: &[(Agent, ReviewResponse)]) -> String {
+    let agents_block = render_reports_for_synthesis(reports);
+    format!(
+        "Specialist agent reports for one bounded pull request batch:\n\n{agents_block}\nThe complete batch diff under review:\n\n{diff}"
+    )
 }
 
 /// Runs one adversarial lens over a single finding, given the file's patch.
@@ -640,4 +642,18 @@ async fn send_request(
         .next()
         .map(|c| c.message.content)
         .context("Mistral returned no choices")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn synthesis_message_keeps_the_complete_bounded_batch() {
+        let diff = format!("{}TAIL_SENTINEL", "é".repeat(11_000));
+        assert!(diff.len() > MAX_DIFF_BYTES);
+        let message = synthesis_user_message(&diff, &[]);
+        assert!(message.ends_with("TAIL_SENTINEL"));
+        assert!(message.contains(&diff));
+    }
 }
