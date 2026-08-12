@@ -46,6 +46,8 @@ fn reusable_workflow_checks_out_its_own_revision() {
     assert!(workflow.contains("ref: ${{ job.workflow_sha }}"));
     assert!(!workflow.contains("repository: nubster-opensources/.github"));
     assert!(!workflow.contains("ref: main"));
+    assert!(workflow.contains("AI_REVIEW_REVISION: ${{ job.workflow_sha }}"));
+    assert!(workflow.contains("AI_REVIEW_COMMENT_AUTHOR: github-actions[bot]"));
 }
 
 #[test]

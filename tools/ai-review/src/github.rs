@@ -387,12 +387,20 @@ pub async fn upsert_global_comment(
         .await
         .context("failed to fetch every PR comment page")?;
 
-    let existing_id = comments.iter().find_map(|c| {
-        c.body
-            .as_deref()
-            .filter(|b| has_bot_marker(b, marker))
-            .map(|_| c.id)
-    });
+    let trusted_author = std::env::var("AI_REVIEW_COMMENT_AUTHOR")
+        .ok()
+        .filter(|author| !author.trim().is_empty());
+    let existing_id = comments
+        .iter()
+        .find(|comment| {
+            is_trusted_global_comment(
+                &comment.user.login,
+                comment.body.as_deref(),
+                marker,
+                trusted_author.as_deref(),
+            )
+        })
+        .map(|comment| comment.id);
 
     if let Some(comment_id) = existing_id {
         octo.issues(owner, repo)
@@ -407,6 +415,49 @@ pub async fn upsert_global_comment(
     }
 
     Ok(())
+}
+
+/// Returns the existing global bot comment containing `marker`, if any.
+pub async fn fetch_global_comment(
+    octo: &Octocrab,
+    owner: &str,
+    repo: &str,
+    pr_number: u64,
+    marker: &str,
+    author_login: &str,
+) -> anyhow::Result<Option<String>> {
+    let first_page = octo
+        .issues(owner, repo)
+        .list_comments(pr_number)
+        .per_page(100)
+        .send()
+        .await
+        .context("failed to list PR comments")?;
+    let comments = octo
+        .all_pages(first_page)
+        .await
+        .context("failed to fetch every PR comment page")?;
+    Ok(comments
+        .into_iter()
+        .find(|comment| {
+            is_trusted_global_comment(
+                &comment.user.login,
+                comment.body.as_deref(),
+                marker,
+                Some(author_login),
+            )
+        })
+        .and_then(|comment| comment.body))
+}
+
+fn is_trusted_global_comment(
+    comment_author: &str,
+    body: Option<&str>,
+    marker: &str,
+    trusted_author: Option<&str>,
+) -> bool {
+    trusted_author.is_none_or(|author| comment_author == author)
+        && body.is_some_and(|value| has_bot_marker(value, marker))
 }
 
 #[derive(serde::Serialize)]
@@ -993,6 +1044,29 @@ mod tests {
             .insert("a.rs".to_string(), HEAD_FILE.to_string());
         let finding = finding_at("a.rs", 1000);
         assert_eq!(ctx.lens_context(&finding), ctx.patch_for(&finding));
+    }
+
+    #[test]
+    fn global_comment_markers_are_accepted_only_from_the_trusted_author() {
+        let body = Some("review\n<!-- ai-team-bot -->");
+        assert!(is_trusted_global_comment(
+            "github-actions[bot]",
+            body,
+            "<!-- ai-team-bot -->",
+            Some("github-actions[bot]")
+        ));
+        assert!(!is_trusted_global_comment(
+            "pull-request-author",
+            body,
+            "<!-- ai-team-bot -->",
+            Some("github-actions[bot]")
+        ));
+        assert!(!is_trusted_global_comment(
+            "github-actions[bot]",
+            Some("ordinary comment"),
+            "<!-- ai-team-bot -->",
+            Some("github-actions[bot]")
+        ));
     }
 
     #[test]
