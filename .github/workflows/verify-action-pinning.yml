@@ -1,0 +1,40 @@
+name: Verify GitHub Action pins (reusable)
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify GitHub Action pins
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: ${{ github.repository }}
+
+      - name: Reject mutable third-party action references
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          workflow_dir=.github/workflows
+          [[ -d "$workflow_dir" ]] || exit 0
+
+          failures=0
+          while IFS=: read -r file line reference; do
+            reference="${reference##*uses:}"
+            reference="${reference#${reference%%[![:space:]]*}}"
+            if [[ "$reference" == ./* ]] || [[ "$reference" == nubster-opensources/.github/.github/workflows/* ]]; then
+              continue
+            fi
+
+            if [[ ! "$reference" =~ @[0-9a-f]{40}[[:space:]]+#[[:space:]]+.+$ ]]; then
+              echo "::error file=$file,line=$line::Third-party action must use a full commit SHA followed by a version comment: $reference"
+              failures=1
+            fi
+          done < <(grep -RInE '^[[:space:]]*(-[[:space:]]*)?uses:[[:space:]]+[^[:space:]]+' "$workflow_dir" || true)
+
+          exit "$failures"
