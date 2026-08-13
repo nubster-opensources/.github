@@ -34,7 +34,9 @@ async fn main() -> anyhow::Result<()> {
         .context("GITHUB_REPOSITORY must be in owner/repo format")?;
 
     let github_token = std::env::var("GITHUB_TOKEN").context("GITHUB_TOKEN not set")?;
-    let mistral_key = std::env::var("MISTRAL_API_KEY").context("MISTRAL_API_KEY not set")?;
+    let mistral_key = require_mistral_api_key(
+        std::env::var("MISTRAL_API_KEY").context("MISTRAL_API_KEY not set")?,
+    )?;
 
     let clients = Clients {
         octo: OctocrabBuilder::default()
@@ -43,6 +45,7 @@ async fn main() -> anyhow::Result<()> {
             .context("failed to build Octocrab client")?,
         http: reqwest::Client::builder()
             .user_agent("ai-review-bot/0.1")
+            .timeout(mistral::REQUEST_TIMEOUT)
             .build()?,
         github_token,
         mistral_key,
@@ -64,6 +67,13 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+fn require_mistral_api_key(mistral_api_key: String) -> anyhow::Result<String> {
+    if mistral_api_key.trim().is_empty() {
+        anyhow::bail!("MISTRAL_API_KEY is empty")
+    }
+    Ok(mistral_api_key)
 }
 
 async fn run_analysis(
@@ -196,4 +206,15 @@ async fn run_describe(
 
     println!("Description generated.");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_mistral_key_is_rejected_before_api_calls() {
+        assert!(require_mistral_api_key("valid-key".to_string()).is_ok());
+        assert!(require_mistral_api_key("   ".to_string()).is_err());
+    }
 }

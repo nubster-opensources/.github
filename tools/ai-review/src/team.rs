@@ -35,17 +35,7 @@ pub async fn run_team(
     println!("Fetching PR #{pr_number} diff for team review…");
     let mut ctx = github::fetch_diff_context(&clients.octo, owner, repo, pr_number).await?;
     if ctx.full.trim().is_empty() {
-        if ctx.coverage_gaps.is_empty() {
-            println!("Empty diff: nothing to review.");
-        } else {
-            let body = review::render_incomplete_team_comment(
-                "no textual patch was available for review",
-                &ctx.coverage_gaps,
-            );
-            github::upsert_global_comment(&clients.octo, owner, repo, pr_number, &body, MARKER)
-                .await?;
-        }
-        return Ok(());
+        return handle_empty_review_input(clients, owner, repo, pr_number, &ctx).await;
     }
 
     let cache_state = load_team_cache(clients, owner, repo, pr_number, &ctx).await?;
@@ -63,25 +53,30 @@ pub async fn run_team(
         } else {
             "all specialist agents failed"
         };
-        let body = review::render_incomplete_team_comment(reason, &ctx.coverage_gaps);
-        github::upsert_global_comment(&clients.octo, owner, repo, pr_number, &body, MARKER).await?;
-        return Ok(());
+        return publish_incomplete_review(
+            clients,
+            owner,
+            repo,
+            pr_number,
+            reason,
+            &ctx.coverage_gaps,
+        )
+        .await;
     }
 
-    let raw_count: usize = batch_runs
-        .iter()
-        .flat_map(|run| &run.reports)
-        .map(|(_, report)| report.findings.len())
-        .sum();
+    let raw_count = raw_finding_count(&batch_runs);
     let (synth, synthesis_gaps) = synthesize_batches(clients, &batch_runs).await;
     ctx.coverage_gaps.extend(synthesis_gaps);
     let Some(mut synth) = synth else {
-        let body = review::render_incomplete_team_comment(
+        return publish_incomplete_review(
+            clients,
+            owner,
+            repo,
+            pr_number,
             "every batch synthesis failed",
             &ctx.coverage_gaps,
-        );
-        github::upsert_global_comment(&clients.octo, owner, repo, pr_number, &body, MARKER).await?;
-        return Ok(());
+        )
+        .await;
     };
 
     let mut findings = std::mem::take(&mut synth.findings);
@@ -102,18 +97,13 @@ pub async fn run_team(
         "Verifying {} finding(s) with the 3-lens vote…",
         findings.len()
     );
-    let VerificationResults {
-        verdicts,
-        cacheable,
-    } = verify_findings(clients, &ctx, &findings, cache_state.reusable()).await;
-    let scored: Vec<(SynthFinding, FindingVerdict)> = findings.into_iter().zip(verdicts).collect();
-    let verdict = compute_verdict(&scored, capped > 0 || !ctx.coverage_gaps.is_empty());
+    let verification = verify_findings(clients, &ctx, &findings, cache_state.reusable()).await;
+    let scored: Vec<(SynthFinding, FindingVerdict)> =
+        findings.into_iter().zip(verification.verdicts).collect();
+    let has_incomplete_coverage = capped > 0 || !ctx.coverage_gaps.is_empty();
+    let verdict = compute_verdict(&scored, has_incomplete_coverage);
 
-    let model = format!(
-        "{} + {}",
-        mistral::TEAM_AGENT_MODEL,
-        mistral::TEAM_SYNTH_MODEL
-    );
+    let model = team_model_label();
     let view = review::TeamCommentView {
         executive_summary: &synth.executive_summary,
         executive_summary_fr: &synth.executive_summary_fr,
@@ -131,15 +121,81 @@ pub async fn run_team(
         coverage_gaps: &ctx.coverage_gaps,
     };
     let mut body = review::render_team_comment(&view);
-    append_team_cache(&mut body, &cache_state, &ctx, &scored, cacheable)?;
+    append_team_cache(
+        &mut body,
+        &cache_state,
+        &ctx,
+        &scored,
+        verification.cacheable,
+        has_incomplete_coverage,
+    )?;
 
     println!("Upserting team comment…");
     github::upsert_global_comment(&clients.octo, owner, repo, pr_number, &body, MARKER).await?;
 
     post_confirmed_inline(clients, owner, repo, pr_number, &head_sha, &ctx, &scored).await?;
 
+    ensure_complete_review(has_incomplete_coverage)?;
     println!("Team review complete.");
     Ok(())
+}
+
+fn team_model_label() -> String {
+    format!(
+        "{} + {}",
+        mistral::TEAM_AGENT_MODEL,
+        mistral::TEAM_SYNTH_MODEL
+    )
+}
+
+async fn handle_empty_review_input(
+    clients: &Clients,
+    owner: &str,
+    repo: &str,
+    pr_number: u64,
+    ctx: &github::DiffContext,
+) -> anyhow::Result<()> {
+    if ctx.coverage_gaps.is_empty() {
+        println!("Empty diff: nothing to review.");
+        return Ok(());
+    }
+    publish_incomplete_review(
+        clients,
+        owner,
+        repo,
+        pr_number,
+        "no textual patch was available for review",
+        &ctx.coverage_gaps,
+    )
+    .await
+}
+
+fn ensure_complete_review(has_incomplete_coverage: bool) -> anyhow::Result<()> {
+    if has_incomplete_coverage {
+        anyhow::bail!("team review is incomplete")
+    }
+    Ok(())
+}
+
+async fn publish_incomplete_review(
+    clients: &Clients,
+    owner: &str,
+    repo: &str,
+    pr_number: u64,
+    reason: &str,
+    coverage_gaps: &[CoverageGap],
+) -> anyhow::Result<()> {
+    let body = review::render_incomplete_team_comment(reason, coverage_gaps);
+    github::upsert_global_comment(&clients.octo, owner, repo, pr_number, &body, MARKER).await?;
+    ensure_complete_review(true)
+}
+
+fn raw_finding_count(batch_runs: &[BatchRun]) -> usize {
+    batch_runs
+        .iter()
+        .flat_map(|run| &run.reports)
+        .map(|(_, report)| report.findings.len())
+        .sum()
 }
 
 struct TeamCacheState {
@@ -206,8 +262,9 @@ fn append_team_cache(
     ctx: &github::DiffContext,
     scored: &[(SynthFinding, FindingVerdict)],
     cacheable: Vec<bool>,
+    has_incomplete_coverage: bool,
 ) -> anyhow::Result<()> {
-    let complete = !has_transient_coverage_gap(ctx) && cacheable.iter().all(|value| *value);
+    let complete = can_cache_review(has_incomplete_coverage, &cacheable);
     if let Some(revision) = state
         .reviewer_revision
         .as_deref()
@@ -228,6 +285,10 @@ fn append_team_cache(
         );
     }
     Ok(())
+}
+
+fn can_cache_review(has_incomplete_coverage: bool, cacheable: &[bool]) -> bool {
+    !has_incomplete_coverage && cacheable.iter().all(|value| *value)
 }
 
 type AgentReports = Vec<(Agent, crate::types::ReviewResponse)>;
@@ -561,15 +622,6 @@ async fn verify_findings(
     }
 }
 
-fn has_transient_coverage_gap(ctx: &github::DiffContext) -> bool {
-    ctx.coverage_gaps.iter().any(|gap| {
-        matches!(
-            gap.kind,
-            CoverageGapKind::AgentFailed | CoverageGapKind::SynthesisFailed
-        )
-    })
-}
-
 /// Posts inline comments for confirmed, critical, line-located findings.
 /// The body shows the French message first and the English message second,
 /// or just the English message when no translation is available.
@@ -895,14 +947,15 @@ mod tests {
     }
 
     #[test]
-    fn transient_model_gaps_prevent_whole_run_caching() {
-        let mut ctx = diff_ctx("a.rs", ONE_HUNK_PATCH);
-        assert!(!has_transient_coverage_gap(&ctx));
-        ctx.coverage_gaps.push(CoverageGap {
-            kind: CoverageGapKind::AgentFailed,
-            file: "a.rs".to_string(),
-            detail: "temporary failure".to_string(),
-        });
-        assert!(has_transient_coverage_gap(&ctx));
+    fn incomplete_review_returns_an_error_after_its_result_is_published() {
+        assert!(ensure_complete_review(false).is_ok());
+        assert!(ensure_complete_review(true).is_err());
+    }
+
+    #[test]
+    fn incomplete_reviews_are_never_cacheable() {
+        assert!(can_cache_review(false, &[true, true]));
+        assert!(!can_cache_review(true, &[true, true]));
+        assert!(!can_cache_review(false, &[true, false]));
     }
 }
