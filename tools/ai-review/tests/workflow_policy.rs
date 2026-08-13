@@ -92,7 +92,7 @@ fn dependency_updates_respect_the_declared_msrv() {
     let manifest = read_repository_file("tools/ai-review/Cargo.toml");
 
     assert!(cargo_config.contains("incompatible-rust-versions = \"fallback\""));
-    assert!(manifest.contains("rust-version = \"1.88\""));
+    assert!(manifest.contains("rust-version = \"1.89\""));
     assert!(manifest.contains("octocrab   = { version = \"0.47\""));
     assert!(manifest.contains("default-features = false"));
     assert!(!manifest.contains("jwt-rust-crypto"));
