@@ -15,6 +15,10 @@ env:
   RUSTFLAGS: "-D warnings"
 
 jobs:
+  action-pinning:
+    name: Workflow action pins
+    uses: ./.github/workflows/verify-action-pinning.yml
+
   fmt:
     name: Format
     runs-on: ubuntu-latest
