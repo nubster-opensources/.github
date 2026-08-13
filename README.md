@@ -12,6 +12,8 @@ and generate PR descriptions using the Mistral API.
 The mode is selected with the `AI_MODE` environment variable, which the
 reusable workflow forwards from its `mode` input.
 
+Security policy: [GitHub Action pinning](docs/ACTION_PINNING_POLICY.md).
+
 | Mode | What it does | Model |
 | --- | --- | --- |
 | `review` | General code review (bugs, logic, security summary) | codestral |
