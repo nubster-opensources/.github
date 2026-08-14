@@ -154,6 +154,14 @@ pub enum Agent {
 }
 
 impl Agent {
+    /// All specialised team-review roles in their presentation order.
+    pub const ALL: [Self; 4] = [
+        Self::Correctness,
+        Self::Security,
+        Self::Architecture,
+        Self::Performance,
+    ];
+
     /// Returns the human-readable label for this agent.
     pub fn label(self) -> &'static str {
         match self {

@@ -79,13 +79,31 @@ pub struct TeamCommentView<'a> {
     pub scored: &'a [(SynthFinding, FindingVerdict)],
     pub verdict: Verdict,
     pub file_count: usize,
-    pub agents_ok: &'a [Agent],
-    pub agents_failed: &'a [Agent],
+    pub agent_coverage: AgentCoverage<'a>,
     pub raw_count: usize,
     pub dedup_count: usize,
     pub capped: usize,
     pub model: &'a str,
     pub coverage_gaps: &'a [CoverageGap],
+}
+
+/// Specialist-agent availability recorded during a team review.
+pub struct AgentCoverage<'a> {
+    pub planned: usize,
+    pub completed: &'a [Agent],
+    pub unavailable: &'a [Agent],
+}
+
+impl<'a> AgentCoverage<'a> {
+    /// Creates coverage values for a single team-review run.
+    #[must_use]
+    pub const fn new(planned: usize, completed: &'a [Agent], unavailable: &'a [Agent]) -> Self {
+        Self {
+            planned,
+            completed,
+            unavailable,
+        }
+    }
 }
 
 /// Language of a rendered report block.
@@ -164,6 +182,10 @@ pub fn render_team_comment(view: &TeamCommentView) -> String {
         md,
         "**Verdict: {verdict_badge}** · {confirmed_count} confirmed · {contested_count} contested\n"
     );
+    md.push_str(&render_coverage_summary(
+        &view.agent_coverage,
+        view.coverage_gaps,
+    ));
 
     if !view.coverage_gaps.is_empty() {
         let _ = writeln!(
@@ -181,10 +203,20 @@ pub fn render_team_comment(view: &TeamCommentView) -> String {
     md.push_str(&render_lang_block(view, Lang::Fr));
 
     md.push_str("---\n");
-    let ok_labels: Vec<&str> = view.agents_ok.iter().map(|a| a.label()).collect();
+    let ok_labels: Vec<&str> = view
+        .agent_coverage
+        .completed
+        .iter()
+        .map(|agent| agent.label())
+        .collect();
     let _ = write!(md, "*Agents: {}", ok_labels.join(", "));
-    if !view.agents_failed.is_empty() {
-        let failed_labels: Vec<&str> = view.agents_failed.iter().map(|a| a.label()).collect();
+    if !view.agent_coverage.unavailable.is_empty() {
+        let failed_labels: Vec<&str> = view
+            .agent_coverage
+            .unavailable
+            .iter()
+            .map(|agent| agent.label())
+            .collect();
         let _ = write!(md, " · failed: {}", failed_labels.join(", "));
     }
     let _ = writeln!(md);
@@ -208,10 +240,16 @@ pub fn render_team_comment(view: &TeamCommentView) -> String {
 
 /// Renders the fail-closed team result used when no synthesis can be scored.
 #[must_use]
-pub fn render_incomplete_team_comment(reason: &str, coverage_gaps: &[CoverageGap]) -> String {
+pub fn render_incomplete_team_comment(
+    reason: &str,
+    coverage_gaps: &[CoverageGap],
+    agent_coverage: &AgentCoverage,
+) -> String {
     let mut md = "<!-- ai-team-bot -->\n## Team Review\n\n".to_string();
     md.push_str("**Verdict: INCOMPLETE ⛔**\n\n");
     let _ = writeln!(md, "⚠️ Team review unavailable: {reason}.");
+    md.push('\n');
+    md.push_str(&render_coverage_summary(agent_coverage, coverage_gaps));
     if !coverage_gaps.is_empty() {
         md.push('\n');
         for gap in coverage_gaps {
@@ -219,6 +257,21 @@ pub fn render_incomplete_team_comment(reason: &str, coverage_gaps: &[CoverageGap
         }
     }
     md
+}
+
+/// Renders the compact coverage overview placed before detailed coverage gaps.
+#[must_use]
+fn render_coverage_summary(
+    agent_coverage: &AgentCoverage,
+    coverage_gaps: &[CoverageGap],
+) -> String {
+    format!(
+        "### Review coverage\n\n| Scope | Planned | Completed | Unavailable |\n| --- | ---: | ---: | ---: |\n| Specialist roles | {} | {} | {} |\n| Coverage gaps | - | - | {} |\n\n",
+        agent_coverage.planned,
+        agent_coverage.completed.len(),
+        agent_coverage.unavailable.len(),
+        coverage_gaps.len()
+    )
 }
 
 /// Renders one language block as a `<details>` section (French opens by default).
@@ -502,8 +555,7 @@ mod tests {
             scored: &scored,
             verdict: Verdict::NeedsWork,
             file_count: 3,
-            agents_ok: &ok,
-            agents_failed: &failed,
+            agent_coverage: AgentCoverage::new(4, &ok, &failed),
             raw_count: 5,
             dedup_count: 3,
             capped: 0,
@@ -527,6 +579,7 @@ mod tests {
         assert!(md.contains("already handled elsewhere"));
         assert!(md.contains("deja gere ailleurs"));
         assert!(md.contains("Performance"));
+        assert!(md.contains("| Specialist roles | 4 | 2 | 1 |"));
         assert!(md.contains("<details><summary>Minor (1)</summary>\n\n"));
     }
 
@@ -542,8 +595,7 @@ mod tests {
             scored: &scored,
             verdict: Verdict::Ship,
             file_count: 1,
-            agents_ok: &ok,
-            agents_failed: &[],
+            agent_coverage: AgentCoverage::new(4, &ok, &[]),
             raw_count: 0,
             dedup_count: 0,
             capped: 0,
@@ -572,8 +624,7 @@ mod tests {
             scored: &[],
             verdict: Verdict::Incomplete,
             file_count: 1,
-            agents_ok: &[],
-            agents_failed: &[],
+            agent_coverage: AgentCoverage::new(0, &[], &[]),
             raw_count: 0,
             dedup_count: 0,
             capped: 0,
@@ -588,16 +639,45 @@ mod tests {
     }
 
     #[test]
+    fn renders_coverage_summary_for_specialist_roles_and_input_gaps() {
+        let gaps = [CoverageGap {
+            kind: crate::types::CoverageGapKind::PatchUnavailable,
+            file: "asset.bin".to_string(),
+            detail: "GitHub did not provide a textual patch".to_string(),
+        }];
+
+        let coverage = AgentCoverage::new(
+            4,
+            &[Agent::Correctness, Agent::Security, Agent::Architecture],
+            &[Agent::Performance],
+        );
+        let summary = render_coverage_summary(&coverage, &gaps);
+
+        assert!(summary.contains("### Review coverage"));
+        assert!(summary.contains("| Specialist roles | 4 | 3 | 1 |"));
+        assert!(summary.contains("| Coverage gaps | - | - | 1 |"));
+    }
+
+    #[test]
     fn renders_incomplete_when_no_synthesis_is_available() {
         let gaps = [CoverageGap {
             kind: crate::types::CoverageGapKind::SynthesisFailed,
             file: "batch 1".to_string(),
             detail: "synthesis failed".to_string(),
         }];
-        let md = render_incomplete_team_comment("every batch synthesis failed", &gaps);
+        let md = render_incomplete_team_comment(
+            "every batch synthesis failed",
+            &gaps,
+            &AgentCoverage::new(
+                4,
+                &[Agent::Correctness, Agent::Security],
+                &[Agent::Performance],
+            ),
+        );
         assert!(md.starts_with("<!-- ai-team-bot -->"));
         assert!(md.contains("Verdict: INCOMPLETE"));
         assert!(md.contains("every batch synthesis failed"));
+        assert!(md.contains("| Specialist roles | 4 | 2 | 1 |"));
         assert!(md.contains("`batch 1`"));
     }
 }
