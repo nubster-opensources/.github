@@ -46,6 +46,7 @@ pub async fn run_team(
 
     let (batch_runs, agents_ok, agents_failed, agent_gaps) =
         run_batch_plan(clients, &ctx.batches).await;
+    let agent_coverage = review::AgentCoverage::new(Agent::ALL.len(), &agents_ok, &agents_failed);
     ctx.coverage_gaps.extend(agent_gaps);
     if batch_runs.iter().all(|run| run.reports.is_empty()) {
         let reason = if ctx.batches.is_empty() {
@@ -60,6 +61,7 @@ pub async fn run_team(
             pr_number,
             reason,
             &ctx.coverage_gaps,
+            &agent_coverage,
         )
         .await;
     }
@@ -75,6 +77,7 @@ pub async fn run_team(
             pr_number,
             "every batch synthesis failed",
             &ctx.coverage_gaps,
+            &agent_coverage,
         )
         .await;
     };
@@ -111,8 +114,7 @@ pub async fn run_team(
         scored: &scored,
         verdict,
         file_count: ctx.file_count,
-        agents_ok: &agents_ok,
-        agents_failed: &agents_failed,
+        agent_coverage,
         raw_count,
         dedup_count,
         capped,
@@ -165,6 +167,7 @@ async fn handle_empty_review_input(
         pr_number,
         "no textual patch was available for review",
         &ctx.coverage_gaps,
+        &review::AgentCoverage::new(0, &[], &[]),
     )
     .await
 }
@@ -183,8 +186,9 @@ async fn publish_incomplete_review(
     pr_number: u64,
     reason: &str,
     coverage_gaps: &[CoverageGap],
+    agent_coverage: &review::AgentCoverage<'_>,
 ) -> anyhow::Result<()> {
-    let body = review::render_incomplete_team_comment(reason, coverage_gaps);
+    let body = review::render_incomplete_team_comment(reason, coverage_gaps, agent_coverage);
     github::upsert_global_comment(&clients.octo, owner, repo, pr_number, &body, MARKER).await?;
     ensure_complete_review(true)
 }
@@ -332,23 +336,29 @@ async fn run_batch_plan(
             reports: batch_reports,
         });
     }
-    let agents = [
-        Agent::Correctness,
-        Agent::Security,
-        Agent::Architecture,
-        Agent::Performance,
-    ];
-    let ok = agents
-        .iter()
-        .copied()
-        .filter(|agent| ok_set.contains(agent))
-        .collect();
-    let failed = agents
-        .iter()
-        .copied()
-        .filter(|agent| failed_set.contains(agent))
-        .collect();
+    let (ok, failed) = classify_agent_coverage(&ok_set, &failed_set);
     (runs, ok, failed, gaps)
+}
+
+fn classify_agent_coverage(
+    reported_by_any_batch: &HashSet<Agent>,
+    failed_by_any_batch: &HashSet<Agent>,
+) -> (Vec<Agent>, Vec<Agent>) {
+    let completed = Agent::ALL
+        .iter()
+        .copied()
+        .filter(|agent| {
+            reported_by_any_batch.contains(agent) && !failed_by_any_batch.contains(agent)
+        })
+        .collect();
+    let unavailable = Agent::ALL
+        .iter()
+        .copied()
+        .filter(|agent| {
+            !reported_by_any_batch.contains(agent) || failed_by_any_batch.contains(agent)
+        })
+        .collect();
+    (completed, unavailable)
 }
 
 async fn synthesize_batches(
@@ -903,6 +913,26 @@ mod tests {
     fn confirmed_critical_takes_precedence_over_incomplete_coverage() {
         let scored = vec![(finding(Severity::Critical), verdict(false))];
         assert_eq!(compute_verdict(&scored, true), Verdict::NeedsWork);
+    }
+
+    #[test]
+    fn agent_coverage_marks_a_role_unavailable_after_any_failed_batch() {
+        let reported_by_any_batch = HashSet::from([
+            Agent::Correctness,
+            Agent::Security,
+            Agent::Architecture,
+            Agent::Performance,
+        ]);
+        let failed_by_any_batch = HashSet::from([Agent::Security]);
+
+        let (completed, unavailable) =
+            classify_agent_coverage(&reported_by_any_batch, &failed_by_any_batch);
+
+        assert_eq!(
+            completed,
+            vec![Agent::Correctness, Agent::Architecture, Agent::Performance]
+        );
+        assert_eq!(unavailable, vec![Agent::Security]);
     }
 
     fn finding_in_file(file: &str, line: u32) -> SynthFinding {
