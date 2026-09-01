@@ -82,12 +82,11 @@ pub async fn run_team(
     let mut findings = std::mem::take(&mut synth.findings);
     findings.sort_by_key(|f| severity_rank(&f.severity));
     let dedup_count = findings.len();
-    let capped = dedup_count.saturating_sub(MAX_VERIFIED_FINDINGS);
+    let (findings, capped) = apply_verification_cap(&ctx, findings);
     if capped > 0 {
         println!(
-            "Verifying top {MAX_VERIFIED_FINDINGS} of {dedup_count} findings ({capped} skipped)."
+            "Capping the lens vote at {MAX_VERIFIED_FINDINGS} of {dedup_count} findings ({capped} left unverified)."
         );
-        findings.truncate(MAX_VERIFIED_FINDINGS);
     }
 
     let head_sha = github::fetch_head_sha(&clients.octo, owner, repo, pr_number).await?;
@@ -509,6 +508,37 @@ fn prefilter_verdict(ctx: &github::DiffContext, finding: &SynthFinding) -> Optio
         });
     }
     None
+}
+
+/// Splits severity-sorted `findings` into the ones this run carries to the
+/// verdict and the number the verification cap drops.
+///
+/// [`MAX_VERIFIED_FINDINGS`] exists to bound the cost of the lens vote, so
+/// only the findings that actually reach that vote consume it. A finding
+/// [`prefilter_verdict`] already settles costs no lens call and is therefore
+/// always kept, however many of them the synthesis produced: counting those
+/// against the cap would report findings as unverified when they were in
+/// fact decided, and a review is declared incomplete on that count alone.
+///
+/// Relative order is preserved, so the caller's severity sort survives.
+fn apply_verification_cap(
+    ctx: &github::DiffContext,
+    findings: Vec<SynthFinding>,
+) -> (Vec<SynthFinding>, usize) {
+    let mut retained = Vec::with_capacity(findings.len());
+    let mut reaching_the_vote = 0;
+    let mut dropped = 0;
+    for finding in findings {
+        if prefilter_verdict(ctx, &finding).is_some() {
+            retained.push(finding);
+        } else if reaching_the_vote < MAX_VERIFIED_FINDINGS {
+            reaching_the_vote += 1;
+            retained.push(finding);
+        } else {
+            dropped += 1;
+        }
+    }
+    (retained, dropped)
 }
 
 /// Verifies each finding with the 3-lens adversarial vote under a concurrency
@@ -944,6 +974,80 @@ mod tests {
         let miss = prefill_verdicts(&changed, &[finding], Some(&cache));
         assert_eq!(miss.cache_hit_count, 0);
         assert_eq!(miss.verdicts, vec![None]);
+    }
+
+    /// Any line of `a.rs` other than the single added line 2 falls outside
+    /// the hunk, so [`prefilter_verdict`] settles it without a lens call.
+    fn settled_by_prefilter(line: u32) -> SynthFinding {
+        finding_in_file("a.rs", line)
+    }
+
+    /// Line 2 is the added line of [`ONE_HUNK_PATCH`], so the finding
+    /// survives the prefilter and reaches the lens vote.
+    fn reaching_the_vote(tag: &str) -> SynthFinding {
+        let mut finding = finding_in_file("a.rs", 2);
+        finding.message = tag.to_string();
+        finding
+    }
+
+    #[test]
+    fn verification_cap_spares_findings_the_prefilter_settles() {
+        let ctx = diff_ctx("a.rs", ONE_HUNK_PATCH);
+        let findings: Vec<SynthFinding> = (0..MAX_VERIFIED_FINDINGS + 8)
+            .map(|index| settled_by_prefilter(50 + u32::try_from(index).expect("small index")))
+            .collect();
+        let total = findings.len();
+
+        let (retained, capped) = apply_verification_cap(&ctx, findings);
+
+        assert_eq!(capped, 0, "prefiltered findings cost no lens call");
+        assert_eq!(retained.len(), total);
+    }
+
+    #[test]
+    fn verification_cap_keeps_every_finding_when_the_vote_stays_under_the_bound() {
+        let ctx = diff_ctx("a.rs", ONE_HUNK_PATCH);
+        let findings: Vec<SynthFinding> = (0..MAX_VERIFIED_FINDINGS)
+            .map(|index| reaching_the_vote(&format!("vote-{index}")))
+            .collect();
+
+        let (retained, capped) = apply_verification_cap(&ctx, findings);
+
+        assert_eq!(capped, 0);
+        assert_eq!(retained.len(), MAX_VERIFIED_FINDINGS);
+    }
+
+    #[test]
+    fn verification_cap_drops_only_findings_that_reach_the_lens_vote() {
+        let ctx = diff_ctx("a.rs", ONE_HUNK_PATCH);
+        let mut findings = vec![settled_by_prefilter(50)];
+        findings.extend(
+            (0..MAX_VERIFIED_FINDINGS + 2).map(|index| reaching_the_vote(&format!("vote-{index}"))),
+        );
+        findings.push(settled_by_prefilter(51));
+        findings.push(settled_by_prefilter(52));
+
+        let (retained, capped) = apply_verification_cap(&ctx, findings);
+
+        assert_eq!(capped, 2, "only the votes beyond the bound are dropped");
+        assert_eq!(retained.len(), MAX_VERIFIED_FINDINGS + 3);
+
+        let mut expected: Vec<String> = vec!["m".to_string()];
+        expected.extend((0..MAX_VERIFIED_FINDINGS).map(|index| format!("vote-{index}")));
+        expected.push("m".to_string());
+        expected.push("m".to_string());
+        let observed: Vec<String> = retained
+            .iter()
+            .map(|finding| finding.message.clone())
+            .collect();
+        assert_eq!(observed, expected, "input order must survive the cap");
+
+        let prefiltered_lines: Vec<u32> = retained
+            .iter()
+            .filter(|finding| finding.line != 2)
+            .map(|finding| finding.line)
+            .collect();
+        assert_eq!(prefiltered_lines, vec![50, 51, 52]);
     }
 
     #[test]
