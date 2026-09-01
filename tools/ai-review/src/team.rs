@@ -82,7 +82,8 @@ pub async fn run_team(
     let mut findings = std::mem::take(&mut synth.findings);
     findings.sort_by_key(|f| severity_rank(&f.severity));
     let dedup_count = findings.len();
-    let (findings, capped) = apply_verification_cap(&ctx, findings);
+    let (findings, dropped) = apply_verification_cap(&ctx, findings);
+    let capped = dropped.len();
     if capped > 0 {
         println!(
             "Capping the lens vote at {MAX_VERIFIED_FINDINGS} of {dedup_count} findings ({capped} left unverified)."
@@ -99,7 +100,7 @@ pub async fn run_team(
     let verification = verify_findings(clients, &ctx, &findings, cache_state.reusable()).await;
     let scored: Vec<(SynthFinding, FindingVerdict)> =
         findings.into_iter().zip(verification.verdicts).collect();
-    let has_incomplete_coverage = capped > 0 || !ctx.coverage_gaps.is_empty();
+    let has_incomplete_coverage = coverage_is_incomplete(&dropped, &ctx.coverage_gaps);
     let verdict = compute_verdict(&scored, has_incomplete_coverage);
 
     let model = team_model_label();
@@ -511,7 +512,7 @@ fn prefilter_verdict(ctx: &github::DiffContext, finding: &SynthFinding) -> Optio
 }
 
 /// Splits severity-sorted `findings` into the ones this run carries to the
-/// verdict and the number the verification cap drops.
+/// verdict and the ones the verification cap drops.
 ///
 /// [`MAX_VERIFIED_FINDINGS`] exists to bound the cost of the lens vote, so
 /// only the findings that actually reach that vote consume it. A finding
@@ -524,10 +525,10 @@ fn prefilter_verdict(ctx: &github::DiffContext, finding: &SynthFinding) -> Optio
 fn apply_verification_cap(
     ctx: &github::DiffContext,
     findings: Vec<SynthFinding>,
-) -> (Vec<SynthFinding>, usize) {
+) -> (Vec<SynthFinding>, Vec<SynthFinding>) {
     let mut retained = Vec::with_capacity(findings.len());
     let mut reaching_the_vote = 0;
-    let mut dropped = 0;
+    let mut dropped = Vec::new();
     for finding in findings {
         if prefilter_verdict(ctx, &finding).is_some() {
             retained.push(finding);
@@ -535,10 +536,25 @@ fn apply_verification_cap(
             reaching_the_vote += 1;
             retained.push(finding);
         } else {
-            dropped += 1;
+            dropped.push(finding);
         }
     }
     (retained, dropped)
+}
+
+/// Whether the run must refuse to conclude.
+///
+/// A dropped finding and an unread input are both coverage the run does not
+/// have, but neither is fatal on its own. The cap cuts the severity-sorted
+/// tail, so dropping only minor findings still means every critical one
+/// reached the vote, and treating that as a failure would leave any large
+/// pull request permanently red. A gap counts only when reading it was
+/// possible at all, which [`CoverageGapKind::is_blocking`] decides.
+fn coverage_is_incomplete(dropped: &[SynthFinding], gaps: &[CoverageGap]) -> bool {
+    dropped
+        .iter()
+        .any(|finding| matches!(finding.severity, Severity::Critical))
+        || gaps.iter().any(|gap| gap.kind.is_blocking())
 }
 
 /// Verifies each finding with the 3-lens adversarial vote under a concurrency
@@ -998,9 +1014,9 @@ mod tests {
             .collect();
         let total = findings.len();
 
-        let (retained, capped) = apply_verification_cap(&ctx, findings);
+        let (retained, dropped) = apply_verification_cap(&ctx, findings);
 
-        assert_eq!(capped, 0, "prefiltered findings cost no lens call");
+        assert!(dropped.is_empty(), "prefiltered findings cost no lens call");
         assert_eq!(retained.len(), total);
     }
 
@@ -1011,9 +1027,9 @@ mod tests {
             .map(|index| reaching_the_vote(&format!("vote-{index}")))
             .collect();
 
-        let (retained, capped) = apply_verification_cap(&ctx, findings);
+        let (retained, dropped) = apply_verification_cap(&ctx, findings);
 
-        assert_eq!(capped, 0);
+        assert!(dropped.is_empty());
         assert_eq!(retained.len(), MAX_VERIFIED_FINDINGS);
     }
 
@@ -1027,9 +1043,13 @@ mod tests {
         findings.push(settled_by_prefilter(51));
         findings.push(settled_by_prefilter(52));
 
-        let (retained, capped) = apply_verification_cap(&ctx, findings);
+        let (retained, dropped) = apply_verification_cap(&ctx, findings);
 
-        assert_eq!(capped, 2, "only the votes beyond the bound are dropped");
+        assert_eq!(
+            dropped.len(),
+            2,
+            "only the votes beyond the bound are dropped"
+        );
         assert_eq!(retained.len(), MAX_VERIFIED_FINDINGS + 3);
 
         let mut expected: Vec<String> = vec!["m".to_string()];
@@ -1061,5 +1081,47 @@ mod tests {
         assert!(can_cache_review(false, &[true, true]));
         assert!(!can_cache_review(true, &[true, true]));
         assert!(!can_cache_review(false, &[true, false]));
+    }
+
+    fn gap(kind: CoverageGapKind) -> CoverageGap {
+        CoverageGap {
+            kind,
+            file: "tests/fixtures/client.p12".to_string(),
+            detail: "d".to_string(),
+        }
+    }
+
+    #[test]
+    fn dropping_only_minor_findings_leaves_the_review_complete() {
+        let dropped = vec![finding(Severity::Minor), finding(Severity::Minor)];
+        assert!(
+            !coverage_is_incomplete(&dropped, &[]),
+            "the cap cuts the severity-sorted tail, so every critical finding was voted on"
+        );
+    }
+
+    #[test]
+    fn dropping_a_critical_finding_leaves_the_review_incomplete() {
+        let dropped = vec![finding(Severity::Minor), finding(Severity::Critical)];
+        assert!(coverage_is_incomplete(&dropped, &[]));
+    }
+
+    #[test]
+    fn a_binary_gap_alone_leaves_the_review_complete() {
+        assert!(
+            !coverage_is_incomplete(&[], &[gap(CoverageGapKind::BinaryContent)]),
+            "no textual patch exists to read, so the gap can never be closed"
+        );
+    }
+
+    #[test]
+    fn a_gap_that_retrying_could_close_leaves_the_review_incomplete() {
+        assert!(coverage_is_incomplete(
+            &[],
+            &[
+                gap(CoverageGapKind::BinaryContent),
+                gap(CoverageGapKind::PatchUnavailable),
+            ]
+        ));
     }
 }
