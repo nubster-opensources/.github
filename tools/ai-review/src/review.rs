@@ -166,11 +166,7 @@ pub fn render_team_comment(view: &TeamCommentView) -> String {
     );
 
     if !view.coverage_gaps.is_empty() {
-        let _ = writeln!(
-            md,
-            "⚠️ **Partial review coverage:** {} input gap(s) were recorded.",
-            view.coverage_gaps.len()
-        );
+        let _ = writeln!(md, "{}", coverage_gap_heading(view.coverage_gaps));
         for gap in view.coverage_gaps {
             let _ = writeln!(md, "- `{}`: {} ({:?})", gap.file, gap.detail, gap.kind);
         }
@@ -208,6 +204,20 @@ pub fn render_team_comment(view: &TeamCommentView) -> String {
 
 /// Renders the fail-closed team result used when no synthesis can be scored.
 #[must_use]
+/// The line introducing the coverage gaps, worded by whether any of them
+/// stopped the run from concluding.
+///
+/// A gap that blocked the verdict and one that merely records an input with no
+/// reviewable text look identical in a list, and a reader who meets the words
+/// "partial coverage" beside a passing check is owed the difference.
+fn coverage_gap_heading(gaps: &[CoverageGap]) -> String {
+    let count = gaps.len();
+    if gaps.iter().any(|gap| gap.kind.is_blocking()) {
+        return format!("⚠️ **Partial review coverage:** {count} input gap(s) were recorded.");
+    }
+    format!("ℹ️ **Inputs with no reviewable text:** {count} file(s) hold nothing a reviewer could read.")
+}
+
 pub fn render_incomplete_team_comment(reason: &str, coverage_gaps: &[CoverageGap]) -> String {
     let mut md = "<!-- ai-team-bot -->\n## Team Review\n\n".to_string();
     md.push_str("**Verdict: INCOMPLETE ⛔**\n\n");
@@ -585,6 +595,29 @@ mod tests {
         assert!(md.contains("INCOMPLETE"));
         assert!(md.contains("`asset.bin`"));
         assert!(md.contains("PatchUnavailable"));
+    }
+
+    #[test]
+    fn a_blocking_gap_and_a_recorded_one_read_differently() {
+        let unreadable = CoverageGap {
+            kind: crate::types::CoverageGapKind::BinaryContent,
+            file: "asset.bin".to_string(),
+            detail: "d".to_string(),
+        };
+        let blocking = CoverageGap {
+            kind: crate::types::CoverageGapKind::PatchUnavailable,
+            file: "src/generated.rs".to_string(),
+            detail: "d".to_string(),
+        };
+
+        let noted = coverage_gap_heading(std::slice::from_ref(&unreadable));
+        let stopped = coverage_gap_heading(&[unreadable, blocking]);
+
+        assert!(
+            !noted.contains("Partial review coverage"),
+            "a passing check must not be introduced as partial coverage"
+        );
+        assert!(stopped.contains("Partial review coverage"));
     }
 
     #[test]

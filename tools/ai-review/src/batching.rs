@@ -35,12 +35,7 @@ pub fn build_review_batches(
             PatchAvailability::Present(patch) => {
                 units.extend(units_for_patch(file, patch, max_batch_bytes, &mut gaps));
             }
-            PatchAvailability::Missing => gaps.push(CoverageGap {
-                kind: CoverageGapKind::PatchUnavailable,
-                file: file.path.clone(),
-                detail: "GitHub did not provide a textual patch; binary and oversized patches cannot be distinguished safely from this response"
-                    .to_string(),
-            }),
+            PatchAvailability::Missing => gaps.push(missing_patch_gap(file)),
         }
     }
 
@@ -340,6 +335,27 @@ fn push_hunk_fragment(
     });
 }
 
+/// Accounts for a file the files endpoint returned without a textual patch.
+///
+/// The endpoint omits a patch both for binary content and for a diff too large
+/// to inline, and the line counts are what separate them. Only the second
+/// hides text a reviewer needed, so only the second blocks the verdict.
+fn missing_patch_gap(file: &ChangedFile) -> CoverageGap {
+    if file.has_binary_content() {
+        return CoverageGap {
+            kind: CoverageGapKind::BinaryContent,
+            file: file.path.clone(),
+            detail: "the file holds binary content, so no textual patch exists to review"
+                .to_string(),
+        };
+    }
+    CoverageGap {
+        kind: CoverageGapKind::PatchUnavailable,
+        file: file.path.clone(),
+        detail: "the textual patch was omitted although the file reports changed lines".to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
@@ -490,5 +506,44 @@ mod tests {
             .gaps
             .iter()
             .any(|gap| gap.kind == CoverageGapKind::BatchBudgetExceeded));
+    }
+
+    fn binary(path: &str) -> ChangedFile {
+        ChangedFile {
+            path: path.to_string(),
+            status: ChangedFileStatus::Added,
+            previous_path: None,
+            additions: 0,
+            deletions: 0,
+            patch: PatchAvailability::Missing,
+            added_lines: BTreeSet::new(),
+        }
+    }
+
+    #[test]
+    fn a_binary_file_is_recorded_as_binary_content() {
+        let plan = build_review_batches(&[binary("tests/fixtures/client.p12")], 4_000, 8);
+
+        let gap = plan
+            .gaps
+            .iter()
+            .find(|gap| gap.file == "tests/fixtures/client.p12")
+            .expect("a file with no patch is always accounted for");
+        assert_eq!(gap.kind, CoverageGapKind::BinaryContent);
+    }
+
+    #[test]
+    fn a_missing_patch_with_line_counts_stays_unavailable() {
+        let mut file = binary("src/generated.rs");
+        file.additions = 4_000;
+
+        let plan = build_review_batches(&[file], 4_000, 8);
+
+        let gap = plan.gaps.first().expect("the omitted patch is a gap");
+        assert_eq!(
+            gap.kind,
+            CoverageGapKind::PatchUnavailable,
+            "a patch omitted for size hides text a reviewer needed to read"
+        );
     }
 }

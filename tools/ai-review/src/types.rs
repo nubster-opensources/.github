@@ -35,16 +35,46 @@ pub struct ChangedFile {
     pub added_lines: BTreeSet<u32>,
 }
 
+impl ChangedFile {
+    /// Whether a missing patch is explained by the file holding binary content.
+    ///
+    /// The files endpoint omits the patch for two unrelated reasons, binary
+    /// content and a diff too large to inline, and separates them only through
+    /// the line counts: binary content reports none, an omitted patch keeps
+    /// its own. A file whose patch is present is never in question.
+    pub fn has_binary_content(&self) -> bool {
+        matches!(self.patch, PatchAvailability::Missing)
+            && self.additions == 0
+            && self.deletions == 0
+    }
+}
+
 /// Reason why part of a pull request could not be put in a model batch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CoverageGapKind {
     PatchUnavailable,
+    BinaryContent,
     MalformedPatch,
     BatchBudgetExceeded,
     OversizedLine,
     AgentFailed,
     SynthesisFailed,
     GitHubFileListIncomplete,
+}
+
+impl CoverageGapKind {
+    /// Whether a gap of this kind leaves the review unable to conclude.
+    ///
+    /// Every other kind marks text a reviewer needed and did not get, so the
+    /// run cannot honestly claim to have covered the change. Binary content is
+    /// different in nature: no textual patch exists to read, and no retry or
+    /// larger budget would produce one. Failing on it would leave every
+    /// repository that versions a binary fixture permanently unable to pass a
+    /// team review, which turns a standing signal into noise. The gap is still
+    /// reported, so a reader keeps the information that nobody read the file.
+    pub fn is_blocking(self) -> bool {
+        !matches!(self, Self::BinaryContent)
+    }
 }
 
 /// Explicit accounting for one piece of review input that was not analysed.
@@ -443,6 +473,63 @@ mod tests {
         for (json, expected) in cases {
             let v: LensVerdict = serde_json::from_str(json).unwrap();
             assert_eq!(v.contested, expected, "input was {json}");
+        }
+    }
+
+    fn missing_patch_file(additions: u64, deletions: u64) -> ChangedFile {
+        ChangedFile {
+            path: "tests/fixtures/client.p12".to_string(),
+            status: ChangedFileStatus::Added,
+            previous_path: None,
+            additions,
+            deletions,
+            patch: PatchAvailability::Missing,
+            added_lines: BTreeSet::new(),
+        }
+    }
+
+    #[test]
+    fn binary_content_is_read_from_absent_line_counts() {
+        assert!(missing_patch_file(0, 0).has_binary_content());
+    }
+
+    #[test]
+    fn a_patch_omitted_for_size_is_not_read_as_binary_content() {
+        assert!(
+            !missing_patch_file(4_000, 12).has_binary_content(),
+            "line counts survive an omitted patch, so they separate the two cases"
+        );
+    }
+
+    #[test]
+    fn a_file_that_has_a_patch_is_never_binary_content() {
+        let mut file = missing_patch_file(0, 0);
+        file.patch = PatchAvailability::Present(
+            "@@ -1 +1 @@
+-a
++b
+"
+            .to_string(),
+        );
+        assert!(!file.has_binary_content());
+    }
+
+    #[test]
+    fn binary_content_is_the_only_gap_kind_that_does_not_block() {
+        assert!(!CoverageGapKind::BinaryContent.is_blocking());
+        for kind in [
+            CoverageGapKind::PatchUnavailable,
+            CoverageGapKind::MalformedPatch,
+            CoverageGapKind::BatchBudgetExceeded,
+            CoverageGapKind::OversizedLine,
+            CoverageGapKind::AgentFailed,
+            CoverageGapKind::SynthesisFailed,
+            CoverageGapKind::GitHubFileListIncomplete,
+        ] {
+            assert!(
+                kind.is_blocking(),
+                "{kind:?} leaves something unread that retrying could have read"
+            );
         }
     }
 }
