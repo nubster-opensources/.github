@@ -187,6 +187,7 @@ mod tests {
     use super::*;
     use crate::types::{
         Category, ChangedFile, ChangedFileStatus, CoverageGap, CoverageGapKind, PatchAvailability,
+        ReviewPriority,
     };
 
     fn finding(message: &str) -> SynthFinding {
@@ -316,6 +317,7 @@ mod tests {
             kind: CoverageGapKind::PatchUnavailable,
             file: "asset.bin".to_string(),
             detail: "missing patch".to_string(),
+            priority: ReviewPriority::Prose,
         });
         assert_ne!(clean, diff_hash(&ctx));
     }
