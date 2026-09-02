@@ -7,7 +7,17 @@ use crate::types::{
 /// Leaves room below the Mistral request limit for prompt framing.
 pub const DEFAULT_BATCH_BYTES: usize = 18_000;
 /// Hard safety bound on specialist calls for unusually large pull requests.
-pub const DEFAULT_MAX_BATCHES: usize = 8;
+///
+/// Eight batches were too tight for an active repository: a change touching
+/// seventeen source files carried 144,300 bytes of code against a ceiling of
+/// 144,000, and lost four of them. Batches also close on hunk boundaries
+/// rather than filling to the byte, so the usable share of that ceiling is
+/// lower than the ceiling itself. Twelve leaves the headroom for both.
+///
+/// Widening the bound is safe only because [`review_priority`] sorts the
+/// input first: the cut now lands on prose, so the extra calls buy coverage
+/// of code rather than more of whatever happened to come last.
+pub const DEFAULT_MAX_BATCHES: usize = 12;
 
 /// Result of converting changed files into bounded, traceable model inputs.
 pub struct BatchPlan {
