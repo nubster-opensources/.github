@@ -212,7 +212,7 @@ pub fn render_team_comment(view: &TeamCommentView) -> String {
 /// "partial coverage" beside a passing check is owed the difference.
 fn coverage_gap_heading(gaps: &[CoverageGap]) -> String {
     let count = gaps.len();
-    if gaps.iter().any(|gap| gap.kind.is_blocking()) {
+    if gaps.iter().any(CoverageGap::is_blocking) {
         return format!("⚠️ **Partial review coverage:** {count} input gap(s) were recorded.");
     }
     format!("ℹ️ **Inputs with no reviewable text:** {count} file(s) hold nothing a reviewer could read.")
@@ -573,6 +573,7 @@ mod tests {
             kind: crate::types::CoverageGapKind::PatchUnavailable,
             file: "asset.bin".to_string(),
             detail: "GitHub did not provide a textual patch".to_string(),
+            priority: crate::types::ReviewPriority::Prose,
         }];
         let view = TeamCommentView {
             executive_summary: "No text to inspect.",
@@ -603,11 +604,13 @@ mod tests {
             kind: crate::types::CoverageGapKind::BinaryContent,
             file: "asset.bin".to_string(),
             detail: "d".to_string(),
+            priority: crate::types::ReviewPriority::Prose,
         };
         let blocking = CoverageGap {
             kind: crate::types::CoverageGapKind::PatchUnavailable,
             file: "src/generated.rs".to_string(),
             detail: "d".to_string(),
+            priority: crate::types::ReviewPriority::SourceCode,
         };
 
         let noted = coverage_gap_heading(std::slice::from_ref(&unreadable));
@@ -626,6 +629,7 @@ mod tests {
             kind: crate::types::CoverageGapKind::SynthesisFailed,
             file: "batch 1".to_string(),
             detail: "synthesis failed".to_string(),
+            priority: crate::types::ReviewPriority::Prose,
         }];
         let md = render_incomplete_team_comment("every batch synthesis failed", &gaps);
         assert!(md.starts_with("<!-- ai-team-bot -->"));

@@ -222,6 +222,7 @@ fn build_diff_context(
             detail: format!(
                 "GitHub reported {file_count} changed files but the files endpoint returned {collected_file_count}; the endpoint is capped at 3,000 files"
             ),
+            priority: crate::types::ReviewPriority::Prose,
         });
     }
 

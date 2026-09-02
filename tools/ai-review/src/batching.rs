@@ -1,6 +1,8 @@
 use std::collections::HashSet;
 
-use crate::types::{ChangedFile, CoverageGap, CoverageGapKind, PatchAvailability, ReviewBatch};
+use crate::types::{
+    ChangedFile, CoverageGap, CoverageGapKind, PatchAvailability, ReviewBatch, ReviewPriority,
+};
 
 /// Leaves room below the Mistral request limit for prompt framing.
 pub const DEFAULT_BATCH_BYTES: usize = 18_000;
@@ -18,6 +20,29 @@ struct ReviewUnit {
     content: String,
 }
 
+/// Ranks a changed file by how much a missed review would cost.
+///
+/// The classification is purely extension-based and repository-neutral: it
+/// never hardcodes a path specific to one project. Build files without an
+/// extension (`Dockerfile`, `Makefile`) are matched by name instead.
+fn review_priority(path: &str) -> ReviewPriority {
+    let file_name = path.rsplit('/').next().unwrap_or(path);
+    let lower_name = file_name.to_ascii_lowercase();
+    if lower_name == "dockerfile" || lower_name == "makefile" {
+        return ReviewPriority::Configuration;
+    }
+
+    match file_name.rsplit_once('.') {
+        Some((_, extension)) => match extension.to_ascii_lowercase().as_str() {
+            "rs" | "ts" | "tsx" | "js" | "jsx" | "py" | "cs" | "go" | "java" | "rb" | "php"
+            | "sh" | "c" | "h" | "cpp" | "hpp" | "kt" | "swift" => ReviewPriority::SourceCode,
+            "yml" | "yaml" | "toml" | "json" | "lock" => ReviewPriority::Configuration,
+            _ => ReviewPriority::Prose,
+        },
+        None => ReviewPriority::Prose,
+    }
+}
+
 /// Builds batches without cutting a UTF-8 codepoint, line, or hunk when the
 /// hunk itself fits. Anything that cannot be represented is returned as an
 /// explicit coverage gap.
@@ -30,7 +55,16 @@ pub fn build_review_batches(
     let mut gaps = Vec::new();
     let mut units = Vec::new();
 
-    for file in files {
+    // A byte budget with no priority signal turns a cost constraint into a
+    // lottery: whichever files happen to land last in GitHub's order are the
+    // ones cut, regardless of whether they were prose or code. Sorting by
+    // priority first, with a stable sort to keep GitHub's order inside each
+    // class, makes the budget cut the cheapest tail (prose, then
+    // configuration) instead of a random slice of the input.
+    let mut ordered_files: Vec<&ChangedFile> = files.iter().collect();
+    ordered_files.sort_by_key(|file| review_priority(&file.path));
+
+    for file in ordered_files {
         match &file.patch {
             PatchAvailability::Present(patch) => {
                 units.extend(units_for_patch(file, patch, max_batch_bytes, &mut gaps));
@@ -51,10 +85,12 @@ pub fn build_review_batches(
 
         if batches.len() >= max_batches {
             if omitted_files.insert(unit.file.clone()) {
+                let priority = review_priority(&unit.file);
                 gaps.push(CoverageGap {
                     kind: CoverageGapKind::BatchBudgetExceeded,
                     file: unit.file,
                     detail: format!("review exceeded the {max_batches}-batch safety limit"),
+                    priority,
                 });
             }
             continue;
@@ -92,6 +128,7 @@ fn units_for_patch(
             kind: CoverageGapKind::OversizedLine,
             file: file.path.clone(),
             detail: "file header alone exceeds the batch budget".to_string(),
+            priority: review_priority(&file.path),
         });
         return Vec::new();
     }
@@ -148,6 +185,7 @@ fn split_hunk_units(
             kind: CoverageGapKind::MalformedPatch,
             file: file.path.clone(),
             detail: "oversized patch contains an invalid hunk header".to_string(),
+            priority: review_priority(&file.path),
         });
         return;
     };
@@ -205,6 +243,7 @@ fn split_hunk_units(
                 kind: CoverageGapKind::OversizedLine,
                 file: file.path.clone(),
                 detail: "one diff line exceeds the batch budget".to_string(),
+                priority: review_priority(&file.path),
             });
             cursor.advance(old_delta, new_delta);
             fragment_start = cursor;
@@ -347,12 +386,14 @@ fn missing_patch_gap(file: &ChangedFile) -> CoverageGap {
             file: file.path.clone(),
             detail: "the file holds binary content, so no textual patch exists to review"
                 .to_string(),
+            priority: review_priority(&file.path),
         };
     }
     CoverageGap {
         kind: CoverageGapKind::PatchUnavailable,
         file: file.path.clone(),
         detail: "the textual patch was omitted although the file reports changed lines".to_string(),
+        priority: review_priority(&file.path),
     }
 }
 
@@ -544,6 +585,140 @@ mod tests {
             gap.kind,
             CoverageGapKind::PatchUnavailable,
             "a patch omitted for size hides text a reviewer needed to read"
+        );
+    }
+
+    #[test]
+    fn review_priority_classifies_each_extension_family() {
+        for path in [
+            "src/main.rs",
+            "app.ts",
+            "component.tsx",
+            "script.js",
+            "app.jsx",
+            "tool.py",
+            "Program.cs",
+            "main.go",
+            "Main.java",
+            "script.rb",
+            "index.php",
+            "run.sh",
+            "main.c",
+            "header.h",
+            "main.cpp",
+            "header.hpp",
+            "Main.kt",
+            "App.swift",
+        ] {
+            assert_eq!(
+                review_priority(path),
+                ReviewPriority::SourceCode,
+                "{path} should classify as source code"
+            );
+        }
+
+        for path in [
+            "config.yml",
+            "config.yaml",
+            "Cargo.toml",
+            "package.json",
+            "Cargo.lock",
+            "Dockerfile",
+            "Makefile",
+        ] {
+            assert_eq!(
+                review_priority(path),
+                ReviewPriority::Configuration,
+                "{path} should classify as configuration"
+            );
+        }
+
+        for path in [
+            "README.md",
+            "notes.txt",
+            "spec.rst",
+            "LICENSE",
+            "unknown.xyz",
+        ] {
+            assert_eq!(
+                review_priority(path),
+                ReviewPriority::Prose,
+                "{path} should classify as prose"
+            );
+        }
+    }
+
+    #[test]
+    fn batch_budget_evicts_prose_before_code_regardless_of_input_order() {
+        let files = vec![
+            changed(
+                "README.md",
+                PatchAvailability::Present("@@ -0,0 +1 @@\n+prose".to_string()),
+            ),
+            changed(
+                "src/lib.rs",
+                PatchAvailability::Present("@@ -0,0 +1 @@\n+code".to_string()),
+            ),
+        ];
+
+        let plan = build_review_batches(&files, 40, 1);
+
+        let evicted: Vec<&str> = plan
+            .gaps
+            .iter()
+            .filter(|gap| gap.kind == CoverageGapKind::BatchBudgetExceeded)
+            .map(|gap| gap.file.as_str())
+            .collect();
+        assert_eq!(
+            evicted,
+            vec!["README.md"],
+            "the budget should evict prose before it ever touches code, whatever order GitHub returned them in"
+        );
+        assert!(
+            plan.batches
+                .iter()
+                .any(|batch| batch.files.iter().any(|file| file == "src/lib.rs")),
+            "code must still be reviewed even though prose came first in GitHub's order"
+        );
+    }
+
+    #[test]
+    fn sorts_by_priority_with_a_stable_ordering_within_each_class() {
+        let files = vec![
+            changed(
+                "b.md",
+                PatchAvailability::Present("@@ -0,0 +1 @@\n+b prose".to_string()),
+            ),
+            changed(
+                "a.rs",
+                PatchAvailability::Present("@@ -0,0 +1 @@\n+fn a() {}".to_string()),
+            ),
+            changed(
+                "config.yml",
+                PatchAvailability::Present("@@ -0,0 +1 @@\n+key: 1".to_string()),
+            ),
+            changed(
+                "b.rs",
+                PatchAvailability::Present("@@ -0,0 +1 @@\n+fn b() {}".to_string()),
+            ),
+            changed(
+                "a.md",
+                PatchAvailability::Present("@@ -0,0 +1 @@\n+a prose".to_string()),
+            ),
+        ];
+
+        let plan = build_review_batches(&files, 10_000, DEFAULT_MAX_BATCHES);
+
+        let order: Vec<&str> = plan
+            .batches
+            .iter()
+            .flat_map(|batch| batch.files.iter())
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            order,
+            vec!["a.rs", "b.rs", "config.yml", "b.md", "a.md"],
+            "source code sorts before configuration before prose, and same-priority files keep their relative input order"
         );
     }
 }

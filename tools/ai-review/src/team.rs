@@ -8,8 +8,8 @@ use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
 use crate::types::{
-    Agent, CoverageGap, CoverageGapKind, FindingVerdict, Lens, LensVerdict, Severity, SynthFinding,
-    SynthReport, Verdict,
+    Agent, CoverageGap, CoverageGapKind, FindingVerdict, Lens, LensVerdict, ReviewPriority,
+    Severity, SynthFinding, SynthReport, Verdict,
 };
 use crate::{github, mistral, review, team_cache, Clients};
 
@@ -326,6 +326,7 @@ async fn run_batch_plan(
                 kind: CoverageGapKind::AgentFailed,
                 file: batch.files.join(", "),
                 detail: format!("{} failed on review batch {}", agent.label(), batch.id),
+                priority: ReviewPriority::SourceCode,
             });
         }
         runs.push(BatchRun {
@@ -382,6 +383,7 @@ async fn synthesize_batches(
                     kind: CoverageGapKind::SynthesisFailed,
                     file: run.batch.files.join(", "),
                     detail: format!("synthesis failed on review batch {}", run.batch.id),
+                    priority: ReviewPriority::SourceCode,
                 });
             }
         }
@@ -554,7 +556,7 @@ fn coverage_is_incomplete(dropped: &[SynthFinding], gaps: &[CoverageGap]) -> boo
     dropped
         .iter()
         .any(|finding| matches!(finding.severity, Severity::Critical))
-        || gaps.iter().any(|gap| gap.kind.is_blocking())
+        || gaps.iter().any(CoverageGap::is_blocking)
 }
 
 /// Verifies each finding with the 3-lens adversarial vote under a concurrency
@@ -1088,6 +1090,16 @@ mod tests {
             kind,
             file: "tests/fixtures/client.p12".to_string(),
             detail: "d".to_string(),
+            priority: ReviewPriority::Prose,
+        }
+    }
+
+    fn budget_gap(priority: ReviewPriority) -> CoverageGap {
+        CoverageGap {
+            kind: CoverageGapKind::BatchBudgetExceeded,
+            file: "docs/readme.md".to_string(),
+            detail: "d".to_string(),
+            priority,
         }
     }
 
@@ -1123,5 +1135,17 @@ mod tests {
                 gap(CoverageGapKind::PatchUnavailable),
             ]
         ));
+    }
+
+    #[test]
+    fn a_batch_budget_gap_blocks_only_when_it_fell_on_code_or_configuration() {
+        assert!(
+            !coverage_is_incomplete(&[], &[budget_gap(ReviewPriority::Prose)]),
+            "the budget only cut prose, so every line of code was still reviewed"
+        );
+        assert!(
+            coverage_is_incomplete(&[], &[budget_gap(ReviewPriority::SourceCode)]),
+            "the budget cut source code, so the review cannot be declared complete"
+        );
     }
 }

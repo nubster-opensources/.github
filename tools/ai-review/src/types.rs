@@ -62,19 +62,12 @@ pub enum CoverageGapKind {
     GitHubFileListIncomplete,
 }
 
-impl CoverageGapKind {
-    /// Whether a gap of this kind leaves the review unable to conclude.
-    ///
-    /// Every other kind marks text a reviewer needed and did not get, so the
-    /// run cannot honestly claim to have covered the change. Binary content is
-    /// different in nature: no textual patch exists to read, and no retry or
-    /// larger budget would produce one. Failing on it would leave every
-    /// repository that versions a binary fixture permanently unable to pass a
-    /// team review, which turns a standing signal into noise. The gap is still
-    /// reported, so a reader keeps the information that nobody read the file.
-    pub fn is_blocking(self) -> bool {
-        !matches!(self, Self::BinaryContent)
-    }
+/// Ranks review input by how much a missed review would cost.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ReviewPriority {
+    SourceCode,
+    Configuration,
+    Prose,
 }
 
 /// Explicit accounting for one piece of review input that was not analysed.
@@ -83,6 +76,27 @@ pub struct CoverageGap {
     pub kind: CoverageGapKind,
     pub file: String,
     pub detail: String,
+    pub priority: ReviewPriority,
+}
+
+impl CoverageGap {
+    /// Whether this gap must fail the run.
+    ///
+    /// Binary content is never blocking: no textual patch exists to read, and
+    /// no retry or larger budget would produce one. A batch-budget gap blocks
+    /// only when it fell on source code or configuration; one that fell
+    /// entirely on prose means every line a reviewer needed was already
+    /// covered, and treating that as a failure would leave any large pull
+    /// request permanently red for cutting text nobody needed to read. Every
+    /// other kind marks text a reviewer needed and did not get, so the run
+    /// cannot honestly claim to have covered the change.
+    pub fn is_blocking(&self) -> bool {
+        match self.kind {
+            CoverageGapKind::BinaryContent => false,
+            CoverageGapKind::BatchBudgetExceeded => self.priority != ReviewPriority::Prose,
+            _ => true,
+        }
+    }
 }
 
 /// A bounded model input assembled from complete file/hunk units.
@@ -514,22 +528,44 @@ mod tests {
         assert!(!file.has_binary_content());
     }
 
-    #[test]
-    fn binary_content_is_the_only_gap_kind_that_does_not_block() {
-        assert!(!CoverageGapKind::BinaryContent.is_blocking());
-        for kind in [
-            CoverageGapKind::PatchUnavailable,
-            CoverageGapKind::MalformedPatch,
-            CoverageGapKind::BatchBudgetExceeded,
-            CoverageGapKind::OversizedLine,
-            CoverageGapKind::AgentFailed,
-            CoverageGapKind::SynthesisFailed,
-            CoverageGapKind::GitHubFileListIncomplete,
-        ] {
-            assert!(
-                kind.is_blocking(),
-                "{kind:?} leaves something unread that retrying could have read"
-            );
+    fn gap(kind: CoverageGapKind, priority: ReviewPriority) -> CoverageGap {
+        CoverageGap {
+            kind,
+            file: "src/lib.rs".to_string(),
+            detail: "d".to_string(),
+            priority,
         }
+    }
+
+    #[test]
+    fn coverage_gap_is_blocking_follows_the_priority_aware_rule() {
+        assert!(
+            !gap(CoverageGapKind::BinaryContent, ReviewPriority::SourceCode).is_blocking(),
+            "no textual patch exists to read, so retrying would not help"
+        );
+        assert!(
+            !gap(CoverageGapKind::BatchBudgetExceeded, ReviewPriority::Prose).is_blocking(),
+            "a budget that only cut prose left every line of code reviewed"
+        );
+        assert!(
+            gap(
+                CoverageGapKind::BatchBudgetExceeded,
+                ReviewPriority::SourceCode
+            )
+            .is_blocking(),
+            "a budget that cut source code left a reviewer without text it needed"
+        );
+        assert!(
+            gap(
+                CoverageGapKind::BatchBudgetExceeded,
+                ReviewPriority::Configuration
+            )
+            .is_blocking(),
+            "a budget that cut configuration left a reviewer without text it needed"
+        );
+        assert!(
+            gap(CoverageGapKind::PatchUnavailable, ReviewPriority::Prose).is_blocking(),
+            "every other gap kind still blocks regardless of priority"
+        );
     }
 }
