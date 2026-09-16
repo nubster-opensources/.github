@@ -15,7 +15,7 @@ jobs:
         with:
           repository: ${{ github.repository }}
 
-      - name: Reject mutable third-party action references
+      - name: Reject mutable action and reusable workflow references
         shell: bash
         run: |
           set -euo pipefail
@@ -27,12 +27,12 @@ jobs:
           while IFS=: read -r file line reference; do
             reference="${reference##*uses:}"
             reference="${reference#${reference%%[![:space:]]*}}"
-            if [[ "$reference" == ./* ]] || [[ "$reference" == nubster-opensources/.github/.github/workflows/* ]]; then
+            if [[ "$reference" == ./* ]]; then
               continue
             fi
 
             if [[ ! "$reference" =~ @[0-9a-f]{40}[[:space:]]+#[[:space:]]+.+$ ]]; then
-              echo "::error file=$file,line=$line::Third-party action must use a full commit SHA followed by a version comment: $reference"
+              echo "::error file=$file,line=$line::Action or reusable workflow must use a full commit SHA followed by a version comment: $reference"
               failures=1
             fi
           done < <(grep -RInE '^[[:space:]]*(-[[:space:]]*)?uses:[[:space:]]+[^[:space:]]+' "$workflow_dir" || true)
