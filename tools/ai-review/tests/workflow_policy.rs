@@ -95,6 +95,6 @@ fn dependency_updates_respect_the_declared_msrv() {
     assert!(manifest.contains("rust-version = \"1.89\""));
     assert!(manifest.contains("octocrab   = { version = \"0.54\""));
     assert!(manifest.contains("default-features = false"));
-    assert!(manifest.contains("jwt-rust-crypto"));
-    assert!(!manifest.contains("jwt-aws-lc-rs"));
+    assert!(!manifest.contains("jwt-rust-crypto"));
+    assert!(manifest.contains("jwt-aws-lc-rs"));
 }
