@@ -365,13 +365,8 @@ async fn synthesize_batches(
     let mut completed = Vec::new();
     let mut gaps = Vec::new();
     for run in runs.iter().filter(|run| !run.reports.is_empty()) {
-        match mistral::call_synthesis(
-            &clients.http,
-            &clients.mistral_key,
-            &run.batch.content,
-            &run.reports,
-        )
-        .await
+        match mistral::call_synthesis(clients.mistral.as_ref(), &run.batch.content, &run.reports)
+            .await
         {
             Ok(report) => completed.push((run.batch.id, report)),
             Err(error) => {
@@ -453,25 +448,10 @@ async fn run_agents(
         Agent::Performance,
     ];
     let (corr, sec, arch, perf) = tokio::join!(
-        mistral::call_agent(
-            &clients.http,
-            &clients.mistral_key,
-            Agent::Correctness,
-            diff
-        ),
-        mistral::call_agent(&clients.http, &clients.mistral_key, Agent::Security, diff),
-        mistral::call_agent(
-            &clients.http,
-            &clients.mistral_key,
-            Agent::Architecture,
-            diff
-        ),
-        mistral::call_agent(
-            &clients.http,
-            &clients.mistral_key,
-            Agent::Performance,
-            diff
-        ),
+        mistral::call_agent(clients.mistral.as_ref(), Agent::Correctness, diff),
+        mistral::call_agent(clients.mistral.as_ref(), Agent::Security, diff),
+        mistral::call_agent(clients.mistral.as_ref(), Agent::Architecture, diff),
+        mistral::call_agent(clients.mistral.as_ref(), Agent::Performance, diff),
     );
 
     let mut reports = Vec::new();
@@ -627,14 +607,15 @@ async fn verify_findings(
         let patch = ctx.lens_context(finding);
         for lens in LENSES {
             let permit_source = Arc::clone(&semaphore);
-            let client = clients.http.clone();
-            let key = clients.mistral_key.clone();
+            let language_model = Arc::clone(&clients.mistral);
             let file = finding.file.clone();
             let message = finding.message.clone();
             let patch = patch.clone();
             set.spawn(async move {
                 let _permit = permit_source.acquire_owned().await.ok();
-                let result = mistral::call_lens(&client, &key, lens, &file, &message, &patch).await;
+                let result =
+                    mistral::call_lens(language_model.as_ref(), lens, &file, &message, &patch)
+                        .await;
                 (idx, lens, result)
             });
         }

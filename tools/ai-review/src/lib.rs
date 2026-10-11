@@ -2,10 +2,14 @@
 
 mod batching;
 mod github;
+mod language_model;
 mod mistral;
+mod mistral_http;
 mod review;
 mod team;
 mod team_cache;
+#[cfg(test)]
+mod test_support;
 mod text;
 mod types;
 
@@ -16,9 +20,8 @@ use types::Mode;
 
 struct Clients {
     octo: octocrab::Octocrab,
-    http: reqwest::Client,
     github_token: String,
-    mistral_key: String,
+    mistral: std::sync::Arc<mistral_http::MistralHttp>,
 }
 
 /// Runs the mode selected by `AI_MODE` against the pull request named by the
@@ -51,12 +54,8 @@ pub async fn run_from_env() -> anyhow::Result<()> {
             .personal_token(github_token.clone())
             .build()
             .context("failed to build Octocrab client")?,
-        http: reqwest::Client::builder()
-            .user_agent("ai-review-bot/0.1")
-            .timeout(mistral::REQUEST_TIMEOUT)
-            .build()?,
         github_token,
-        mistral_key,
+        mistral: std::sync::Arc::new(mistral_http::MistralHttp::new(mistral_key)?),
     };
 
     match mode {
@@ -106,17 +105,13 @@ async fn run_analysis(
 
     println!("Calling Mistral ({model}): {label}…");
     let (response, truncated) = match mode {
-        Mode::Review => {
-            mistral::call_review(&clients.http, &clients.mistral_key, model, diff).await?
-        }
-        Mode::Security => {
-            mistral::call_security(&clients.http, &clients.mistral_key, model, diff).await?
-        }
+        Mode::Review => mistral::call_review(clients.mistral.as_ref(), model, diff).await?,
+        Mode::Security => mistral::call_security(clients.mistral.as_ref(), model, diff).await?,
         Mode::Architecture => {
-            mistral::call_architecture(&clients.http, &clients.mistral_key, model, diff).await?
+            mistral::call_architecture(clients.mistral.as_ref(), model, diff).await?
         }
         Mode::Performance => {
-            mistral::call_performance(&clients.http, &clients.mistral_key, model, diff).await?
+            mistral::call_performance(clients.mistral.as_ref(), model, diff).await?
         }
         _ => unreachable!(),
     };
@@ -176,7 +171,7 @@ async fn run_product(
     }
 
     println!("Calling Mistral ({model}): {label}…");
-    let body = mistral::call_product(&clients.http, &clients.mistral_key, model, &diff).await?;
+    let body = mistral::call_product(clients.mistral.as_ref(), model, &diff).await?;
 
     let full_body = format!("{marker}\n{body}");
     println!("Upserting product comment…");
@@ -206,8 +201,7 @@ async fn run_describe(
 
     let model = Mode::Describe.mistral_model();
     println!("Calling Mistral ({model})…");
-    let generated_body =
-        mistral::call_describe(&clients.http, &clients.mistral_key, model, &diff).await?;
+    let generated_body = mistral::call_describe(clients.mistral.as_ref(), model, &diff).await?;
 
     println!("Updating PR body…");
     github::update_pr_body(&clients.octo, owner, repo, pr_number, &generated_body).await?;

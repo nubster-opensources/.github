@@ -1,21 +1,15 @@
 #![allow(clippy::missing_errors_doc)]
 
 use std::fmt::Write as _;
-use std::time::Duration;
 
 use anyhow::Context;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
+use crate::language_model::{CallPurpose, ChatRequest, LanguageModel, Message, ResponseFormat};
 use crate::text::truncate_utf8;
 use crate::types::{Agent, Lens, LensVerdict, ReviewResponse, Severity, SynthReport};
 
-const API_URL: &str = "https://api.mistral.ai/v1/chat/completions";
 const MAX_DIFF_BYTES: usize = 20_000;
-const MAX_REQUEST_ATTEMPTS: usize = 3;
-const RETRY_DELAY_MILLIS: u64 = 250;
-
-/// Maximum duration of one Mistral API request.
-pub(crate) const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Model used by the four specialist agents in team mode.
 pub(crate) const TEAM_AGENT_MODEL: &str = "codestral-latest";
@@ -23,41 +17,6 @@ pub(crate) const TEAM_AGENT_MODEL: &str = "codestral-latest";
 pub(crate) const TEAM_SYNTH_MODEL: &str = "mistral-large-latest";
 /// Model used by the adversarial lenses in team mode.
 pub(crate) const TEAM_LENS_MODEL: &str = "codestral-latest";
-
-#[derive(Serialize)]
-struct ChatRequest {
-    model: String,
-    messages: Vec<Message>,
-    response_format: ResponseFormat,
-    temperature: f32,
-}
-
-#[derive(Serialize)]
-struct Message {
-    role: String,
-    content: String,
-}
-
-#[derive(Serialize)]
-struct ResponseFormat {
-    #[serde(rename = "type")]
-    kind: &'static str,
-}
-
-#[derive(Deserialize)]
-struct ChatResponse {
-    choices: Vec<Choice>,
-}
-
-#[derive(Deserialize)]
-struct Choice {
-    message: ChoiceMessage,
-}
-
-#[derive(Deserialize)]
-struct ChoiceMessage {
-    content: String,
-}
 
 #[derive(Deserialize)]
 struct DescribeResponse {
@@ -303,9 +262,9 @@ Return valid JSON only, no markdown fences."#
         .to_string()
 }
 
-async fn call_analysis_mode(
-    client: &reqwest::Client,
-    api_key: &str,
+async fn call_analysis_mode<M: LanguageModel>(
+    language_model: &M,
+    purpose: CallPurpose,
     model: &str,
     system_prompt: String,
     diff: &str,
@@ -313,6 +272,7 @@ async fn call_analysis_mode(
     let (content, truncated) = truncate_diff(diff);
 
     let request = ChatRequest {
+        purpose,
         model: model.to_string(),
         messages: vec![
             Message {
@@ -330,7 +290,7 @@ async fn call_analysis_mode(
         temperature: 0.1,
     };
 
-    let raw = send_request(client, api_key, &request).await?;
+    let raw = language_model.complete(&request).await?;
     let response: ReviewResponse =
         serde_json::from_str(&raw).context("failed to parse Mistral response as JSON")?;
 
@@ -338,55 +298,79 @@ async fn call_analysis_mode(
 }
 
 /// Returns `(ReviewResponse, truncated)` using enriched Nubster-aware system prompt.
-pub async fn call_review(
-    client: &reqwest::Client,
-    api_key: &str,
+pub async fn call_review<M: LanguageModel>(
+    language_model: &M,
     model: &str,
     diff: &str,
 ) -> anyhow::Result<(ReviewResponse, bool)> {
-    call_analysis_mode(client, api_key, model, review_system_prompt(), diff).await
+    call_analysis_mode(
+        language_model,
+        CallPurpose::Analysis,
+        model,
+        review_system_prompt(),
+        diff,
+    )
+    .await
 }
 
 /// Returns `(ReviewResponse, truncated)` focused on security vulnerabilities.
-pub async fn call_security(
-    client: &reqwest::Client,
-    api_key: &str,
+pub async fn call_security<M: LanguageModel>(
+    language_model: &M,
     model: &str,
     diff: &str,
 ) -> anyhow::Result<(ReviewResponse, bool)> {
-    call_analysis_mode(client, api_key, model, security_system_prompt(), diff).await
+    call_analysis_mode(
+        language_model,
+        CallPurpose::Analysis,
+        model,
+        security_system_prompt(),
+        diff,
+    )
+    .await
 }
 
 /// Returns `(ReviewResponse, truncated)` focused on architecture and design.
-pub async fn call_architecture(
-    client: &reqwest::Client,
-    api_key: &str,
+pub async fn call_architecture<M: LanguageModel>(
+    language_model: &M,
     model: &str,
     diff: &str,
 ) -> anyhow::Result<(ReviewResponse, bool)> {
-    call_analysis_mode(client, api_key, model, architecture_system_prompt(), diff).await
+    call_analysis_mode(
+        language_model,
+        CallPurpose::Analysis,
+        model,
+        architecture_system_prompt(),
+        diff,
+    )
+    .await
 }
 
 /// Returns `(ReviewResponse, truncated)` focused on performance issues.
-pub async fn call_performance(
-    client: &reqwest::Client,
-    api_key: &str,
+pub async fn call_performance<M: LanguageModel>(
+    language_model: &M,
     model: &str,
     diff: &str,
 ) -> anyhow::Result<(ReviewResponse, bool)> {
-    call_analysis_mode(client, api_key, model, performance_system_prompt(), diff).await
+    call_analysis_mode(
+        language_model,
+        CallPurpose::Analysis,
+        model,
+        performance_system_prompt(),
+        diff,
+    )
+    .await
 }
 
 /// Returns a product-focused markdown comment body.
-pub async fn call_product(
-    client: &reqwest::Client,
-    api_key: &str,
+pub async fn call_product<M: LanguageModel>(
+    language_model: &M,
     model: &str,
     diff: &str,
 ) -> anyhow::Result<String> {
     let (content, _) = truncate_diff(diff);
 
     let request = ChatRequest {
+        purpose: CallPurpose::Product,
         model: model.to_string(),
         messages: vec![
             Message {
@@ -404,7 +388,7 @@ pub async fn call_product(
         temperature: 0.3,
     };
 
-    let raw = send_request(client, api_key, &request).await?;
+    let raw = language_model.complete(&request).await?;
     let parsed: DescribeResponse =
         serde_json::from_str(&raw).context("failed to parse Mistral product response")?;
 
@@ -412,15 +396,15 @@ pub async fn call_product(
 }
 
 /// Returns the generated PR body markdown.
-pub async fn call_describe(
-    client: &reqwest::Client,
-    api_key: &str,
+pub async fn call_describe<M: LanguageModel>(
+    language_model: &M,
     model: &str,
     diff: &str,
 ) -> anyhow::Result<String> {
     let (content, _) = truncate_diff(diff);
 
     let request = ChatRequest {
+        purpose: CallPurpose::Describe,
         model: model.to_string(),
         messages: vec![
             Message {
@@ -438,7 +422,7 @@ pub async fn call_describe(
         temperature: 0.3,
     };
 
-    let raw = send_request(client, api_key, &request).await?;
+    let raw = language_model.complete(&request).await?;
     let parsed: DescribeResponse =
         serde_json::from_str(&raw).context("failed to parse Mistral describe response")?;
 
@@ -529,15 +513,14 @@ fn render_reports_for_synthesis(reports: &[(Agent, ReviewResponse)]) -> String {
 }
 
 /// Runs one specialist agent over the diff. Returns `(ReviewResponse, truncated)`.
-pub async fn call_agent(
-    client: &reqwest::Client,
-    api_key: &str,
+pub async fn call_agent<M: LanguageModel>(
+    language_model: &M,
     agent: Agent,
     diff: &str,
 ) -> anyhow::Result<(ReviewResponse, bool)> {
     call_analysis_mode(
-        client,
-        api_key,
+        language_model,
+        CallPurpose::Agent(agent),
         TEAM_AGENT_MODEL,
         agent_system_prompt(agent),
         diff,
@@ -546,13 +529,13 @@ pub async fn call_agent(
 }
 
 /// Merges the specialist agent reports into a single deduplicated [`SynthReport`].
-pub async fn call_synthesis(
-    client: &reqwest::Client,
-    api_key: &str,
+pub async fn call_synthesis<M: LanguageModel>(
+    language_model: &M,
     diff: &str,
     reports: &[(Agent, ReviewResponse)],
 ) -> anyhow::Result<SynthReport> {
     let request = ChatRequest {
+        purpose: CallPurpose::Synthesis,
         model: TEAM_SYNTH_MODEL.to_string(),
         messages: vec![
             Message {
@@ -570,7 +553,7 @@ pub async fn call_synthesis(
         temperature: 0.2,
     };
 
-    let raw = send_request(client, api_key, &request).await?;
+    let raw = language_model.complete(&request).await?;
     serde_json::from_str(&raw).context("failed to parse Mistral synthesis response")
 }
 
@@ -582,9 +565,8 @@ fn synthesis_user_message(diff: &str, reports: &[(Agent, ReviewResponse)]) -> St
 }
 
 /// Runs one adversarial lens over a single finding, given the file's patch.
-pub async fn call_lens(
-    client: &reqwest::Client,
-    api_key: &str,
+pub async fn call_lens<M: LanguageModel>(
+    language_model: &M,
     lens: Lens,
     file: &str,
     message: &str,
@@ -593,6 +575,7 @@ pub async fn call_lens(
     let (patch_content, _) = truncate_diff(patch);
 
     let request = ChatRequest {
+        purpose: CallPurpose::Lens(lens),
         model: TEAM_LENS_MODEL.to_string(),
         messages: vec![
             Message {
@@ -612,7 +595,7 @@ pub async fn call_lens(
         temperature: 0.0,
     };
 
-    let raw = send_request(client, api_key, &request).await?;
+    let raw = language_model.complete(&request).await?;
     serde_json::from_str(&raw).context("failed to parse Mistral lens response")
 }
 
@@ -620,181 +603,48 @@ fn truncate_diff(diff: &str) -> (&str, bool) {
     truncate_utf8(diff, MAX_DIFF_BYTES)
 }
 
-async fn send_request(
-    client: &reqwest::Client,
-    api_key: &str,
-    request: &ChatRequest,
-) -> anyhow::Result<String> {
-    send_request_to(client, api_key, request, API_URL).await
-}
-
-async fn send_request_to(
-    client: &reqwest::Client,
-    api_key: &str,
-    request: &ChatRequest,
-    endpoint: &str,
-) -> anyhow::Result<String> {
-    for attempt in 1..=MAX_REQUEST_ATTEMPTS {
-        match client
-            .post(endpoint)
-            .bearer_auth(api_key)
-            .json(request)
-            .send()
-            .await
-        {
-            Ok(response) if response.status().is_success() => {
-                let chat: ChatResponse = response
-                    .json()
-                    .await
-                    .context("failed to parse Mistral API response")?;
-                return chat
-                    .choices
-                    .into_iter()
-                    .next()
-                    .map(|choice| choice.message.content)
-                    .context("Mistral returned no choices");
-            }
-            Ok(response) => {
-                let status = response.status();
-                let body = response.text().await.unwrap_or_default();
-                if is_retryable_status(status) && attempt < MAX_REQUEST_ATTEMPTS {
-                    eprintln!(
-                        "warning: Mistral API returned {status}; retrying request {attempt}/{MAX_REQUEST_ATTEMPTS}"
-                    );
-                    wait_before_retry(attempt).await;
-                    continue;
-                }
-                anyhow::bail!("Mistral API error {status}: {body}");
-            }
-            Err(error) if attempt < MAX_REQUEST_ATTEMPTS => {
-                eprintln!(
-                    "warning: Mistral API request failed: {error}; retrying request {attempt}/{MAX_REQUEST_ATTEMPTS}"
-                );
-                wait_before_retry(attempt).await;
-            }
-            Err(error) => return Err(error).context("failed to reach Mistral API"),
-        }
-    }
-
-    unreachable!("the request loop either returns a response or an error")
-}
-
-fn is_retryable_status(status: reqwest::StatusCode) -> bool {
-    status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
-}
-
-async fn wait_before_retry(attempt: usize) {
-    let delay = Duration::from_millis(RETRY_DELAY_MILLIS * attempt as u64);
-    tokio::time::sleep(delay).await;
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpListener;
+    use crate::test_support::ScriptedModel;
+    use crate::types::{Agent, Lens};
 
-    const SUCCESS_RESPONSE: &str = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: 42\r\n\r\n{\"choices\":[{\"message\":{\"content\":\"ok\"}}]}";
-    const TOO_MANY_REQUESTS_RESPONSE: &str =
-        "HTTP/1.1 429 Too Many Requests\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
-    const SERVER_ERROR_RESPONSE: &str =
-        "HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
-    const UNAUTHORIZED_RESPONSE: &str =
-        "HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
-
-    async fn response_server(
-        responses: Vec<&'static str>,
-    ) -> (String, tokio::task::JoinHandle<usize>) {
-        let listener = TcpListener::bind("127.0.0.1:0")
+    #[tokio::test]
+    async fn lens_calls_carry_their_purpose_model_and_temperature() {
+        let model =
+            ScriptedModel::new(|_| Ok(r#"{"contested":false,"reason":"confirmed"}"#.to_string()));
+        let verdict = call_lens(&model, Lens::RealImpact, "src/lib.rs", "claim", "patch")
             .await
-            .expect("bind test server");
-        let address = listener.local_addr().expect("read test server address");
-        let server = tokio::spawn(async move {
-            let mut request_count = 0;
-            for response in responses {
-                let Ok(Ok((mut stream, _))) =
-                    tokio::time::timeout(Duration::from_secs(2), listener.accept()).await
-                else {
-                    break;
-                };
-                let mut request = [0_u8; 4_096];
-                let _bytes_read = stream.read(&mut request).await.expect("read test request");
-                stream
-                    .write_all(response.as_bytes())
-                    .await
-                    .expect("write test response");
-                stream.shutdown().await.expect("close test response");
-                request_count += 1;
-            }
-            request_count
+            .expect("lens verdict");
+        assert!(!verdict.contested);
+        let requests = model.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].purpose, CallPurpose::Lens(Lens::RealImpact));
+        assert_eq!(requests[0].model, TEAM_LENS_MODEL);
+        assert!(requests[0].temperature.abs() < f32::EPSILON);
+    }
+
+    #[tokio::test]
+    async fn agent_calls_carry_their_agent_and_parse_the_report() {
+        let model = ScriptedModel::new(|_| {
+            Ok(r#"{"summary":"s","strengths":[],"findings":[],"security":"none"}"#.to_string())
         });
-        (format!("http://{address}"), server)
-    }
-
-    fn test_request() -> ChatRequest {
-        ChatRequest {
-            model: "test".to_string(),
-            messages: Vec::new(),
-            response_format: ResponseFormat {
-                kind: "json_object",
-            },
-            temperature: 0.0,
-        }
-    }
-
-    #[tokio::test]
-    async fn retries_a_transient_response_before_returning_success() {
-        let (endpoint, server) = response_server(vec![
-            SERVER_ERROR_RESPONSE,
-            TOO_MANY_REQUESTS_RESPONSE,
-            SUCCESS_RESPONSE,
-        ])
-        .await;
-        let response = send_request_to(&reqwest::Client::new(), "key", &test_request(), &endpoint)
+        let (report, truncated) = call_agent(&model, Agent::Security, "diff")
             .await
-            .expect("retry succeeds");
-
-        assert_eq!(response, "ok");
-        assert_eq!(server.await.expect("test server joins"), 3);
+            .expect("agent report");
+        assert!(report.findings.is_empty());
+        assert!(!truncated);
+        assert_eq!(model.purposes(), vec![CallPurpose::Agent(Agent::Security)]);
+        assert_eq!(model.requests()[0].model, TEAM_AGENT_MODEL);
     }
 
     #[tokio::test]
-    async fn does_not_retry_an_authentication_failure() {
-        let (endpoint, server) =
-            response_server(vec![UNAUTHORIZED_RESPONSE, SUCCESS_RESPONSE]).await;
-        let result =
-            send_request_to(&reqwest::Client::new(), "key", &test_request(), &endpoint).await;
-
-        assert!(result.is_err());
-        assert_eq!(server.await.expect("test server joins"), 1);
-    }
-
-    #[tokio::test]
-    async fn stops_after_the_bounded_number_of_transient_failures() {
-        let (endpoint, server) = response_server(vec![
-            SERVER_ERROR_RESPONSE,
-            SERVER_ERROR_RESPONSE,
-            SERVER_ERROR_RESPONSE,
-        ])
-        .await;
-        let result =
-            send_request_to(&reqwest::Client::new(), "key", &test_request(), &endpoint).await;
-
-        assert!(result.is_err());
-        assert_eq!(
-            server.await.expect("test server joins"),
-            MAX_REQUEST_ATTEMPTS
-        );
-    }
-
-    #[test]
-    fn retries_transient_responses_but_not_authentication_failures() {
-        assert!(is_retryable_status(reqwest::StatusCode::TOO_MANY_REQUESTS));
-        assert!(is_retryable_status(
-            reqwest::StatusCode::INTERNAL_SERVER_ERROR
-        ));
-        assert!(!is_retryable_status(reqwest::StatusCode::UNAUTHORIZED));
-        assert!(!is_retryable_status(reqwest::StatusCode::BAD_REQUEST));
+    async fn a_model_error_surfaces_from_the_synthesis_call() {
+        let model = ScriptedModel::new(|_| anyhow::bail!("model unavailable"));
+        let error = call_synthesis(&model, "diff", &[])
+            .await
+            .expect_err("the synthesis must fail");
+        assert!(error.to_string().contains("model unavailable"));
     }
 
     #[test]
