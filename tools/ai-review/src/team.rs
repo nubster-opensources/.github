@@ -11,7 +11,7 @@ use crate::types::{
     Agent, CoverageGap, CoverageGapKind, FindingVerdict, Lens, LensVerdict, ReviewPriority,
     Severity, SynthFinding, SynthReport, Verdict,
 };
-use crate::{github, mistral, review, team_cache, Clients};
+use crate::{github, mistral, review, team_cache, team_review, Clients};
 
 /// Maximum number of synthesised findings put through adversarial verification.
 const MAX_VERIFIED_FINDINGS: usize = 15;
@@ -26,6 +26,7 @@ const MARKER: &str = "<!-- ai-team-bot -->";
 const MIN_CONFIRM_VOTES: usize = 2;
 
 /// Runs the full multi-agent team review pipeline for a pull request.
+#[allow(clippy::too_many_lines)]
 pub async fn run_team(
     clients: &Clients,
     owner: &str,
@@ -91,7 +92,13 @@ pub async fn run_team(
     }
 
     let head_sha = github::fetch_head_sha(&clients.octo, owner, repo, pr_number).await?;
-    github::populate_head_files(&clients.octo, owner, repo, &head_sha, &findings, &mut ctx).await;
+    let head_files = github::GitHubHeadFiles {
+        octo: &clients.octo,
+        owner,
+        repo,
+        sha: &head_sha,
+    };
+    team_review::populate_head_files(&head_files, &findings, &mut ctx).await;
 
     println!(
         "Verifying {} finding(s) with the 3-lens vote…",

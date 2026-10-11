@@ -2,12 +2,14 @@
 
 mod batching;
 mod github;
+mod head_file_source;
 mod language_model;
 mod mistral;
 mod mistral_http;
 mod review;
 mod team;
 mod team_cache;
+mod team_review;
 #[cfg(test)]
 mod test_support;
 mod text;

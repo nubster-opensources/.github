@@ -8,6 +8,7 @@ use octocrab::models::repos::{DiffEntry, DiffEntryStatus};
 use octocrab::Octocrab;
 
 use crate::batching::{build_review_batches, DEFAULT_BATCH_BYTES, DEFAULT_MAX_BATCHES};
+use crate::head_file_source::HeadFileSource;
 use crate::review::has_bot_marker;
 use crate::text::truncate_utf8;
 use crate::types::{
@@ -343,32 +344,17 @@ pub async fn fetch_head_file(
         .and_then(|item| item.decoded_content()))
 }
 
-/// Fills `ctx.head_files` with the head content of every distinct file named by
-/// a line-located finding that also has a per-file patch. Failures degrade
-/// gracefully: a missing or unreadable file is simply skipped.
-pub async fn populate_head_files(
-    octo: &Octocrab,
-    owner: &str,
-    repo: &str,
-    sha: &str,
-    findings: &[SynthFinding],
-    ctx: &mut DiffContext,
-) {
-    let mut wanted: Vec<String> = findings
-        .iter()
-        .filter(|f| f.line > 0 && ctx.by_file.contains_key(&f.file))
-        .map(|f| f.file.clone())
-        .collect();
-    wanted.sort();
-    wanted.dedup();
-    for path in wanted {
-        match fetch_head_file(octo, owner, repo, &path, sha).await {
-            Ok(Some(content)) => {
-                ctx.head_files.insert(path, content);
-            }
-            Ok(None) => {}
-            Err(error) => eprintln!("warning: could not fetch head file {path}: {error}"),
-        }
+/// Reads head file contents from GitHub at a fixed commit.
+pub(crate) struct GitHubHeadFiles<'a> {
+    pub octo: &'a Octocrab,
+    pub owner: &'a str,
+    pub repo: &'a str,
+    pub sha: &'a str,
+}
+
+impl HeadFileSource for GitHubHeadFiles<'_> {
+    async fn read(&self, path: &str) -> anyhow::Result<Option<String>> {
+        fetch_head_file(self.octo, self.owner, self.repo, path, self.sha).await
     }
 }
 
