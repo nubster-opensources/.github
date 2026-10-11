@@ -6,6 +6,10 @@ rust-version = "1.89"
 license = "MIT OR Apache-2.0"
 description = "Pull request review and description tooling for Nubster Open Source, powered by the Mistral API."
 
+[lib]
+name = "ai_review"
+path = "src/lib.rs"
+
 [[bin]]
 name = "ai-review"
 path = "src/main.rs"
