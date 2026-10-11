@@ -210,7 +210,7 @@ impl Agent {
 }
 
 /// One adversarial lens applied to a synthesised finding during verification.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Lens {
     CodeConfirms,
     RealImpact,

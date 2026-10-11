@@ -8,6 +8,7 @@ use octocrab::models::repos::{DiffEntry, DiffEntryStatus};
 use octocrab::Octocrab;
 
 use crate::batching::{build_review_batches, DEFAULT_BATCH_BYTES, DEFAULT_MAX_BATCHES};
+use crate::head_file_source::HeadFileSource;
 use crate::review::has_bot_marker;
 use crate::text::truncate_utf8;
 use crate::types::{
@@ -40,6 +41,59 @@ pub struct DiffContext {
 }
 
 impl DiffContext {
+    /// Builds the review context from changed files already normalised away from
+    /// any forge type, so a caller other than the GitHub adapter can feed the
+    /// review core.
+    pub fn from_changed_files(
+        files: Vec<ChangedFile>,
+        expected_file_count: Option<usize>,
+    ) -> anyhow::Result<Self> {
+        let mut seen = HashSet::with_capacity(files.len());
+        for file in &files {
+            if !seen.insert(file.path.as_str()) {
+                anyhow::bail!("duplicate changed file path: {}", file.path);
+            }
+        }
+
+        let collected_file_count = files.len();
+        let file_count = expected_file_count.unwrap_or(collected_file_count);
+        let mut full = String::new();
+        let mut by_file = HashMap::with_capacity(collected_file_count);
+        for file in &files {
+            let _ = writeln!(full, "--- {}", file.path);
+            match &file.patch {
+                PatchAvailability::Present(patch) => {
+                    full.push_str(patch);
+                    by_file.insert(file.path.clone(), patch.clone());
+                }
+                PatchAvailability::Missing => full.push_str("[textual patch unavailable]"),
+            }
+            full.push('\n');
+        }
+
+        let mut plan = build_review_batches(&files, DEFAULT_BATCH_BYTES, DEFAULT_MAX_BATCHES);
+        if expected_file_count.is_some_and(|expected| expected != collected_file_count) {
+            plan.gaps.push(CoverageGap {
+                kind: crate::types::CoverageGapKind::GitHubFileListIncomplete,
+                file: "pull request".to_string(),
+                detail: format!(
+                    "GitHub reported {file_count} changed files but the files endpoint returned {collected_file_count}; the endpoint is capped at 3,000 files"
+                ),
+                priority: crate::types::ReviewPriority::Prose,
+            });
+        }
+
+        Ok(Self {
+            full,
+            by_file,
+            head_files: HashMap::new(),
+            file_count,
+            files,
+            batches: plan.batches,
+            coverage_gaps: plan.gaps,
+        })
+    }
+
     /// Returns the patch to hand to a lens for `finding`, falling back to a
     /// truncated view of the full diff for file-level or cross-file findings.
     #[must_use]
@@ -181,60 +235,12 @@ fn build_diff_context(
     entries: Vec<DiffEntry>,
     expected_file_count: Option<u64>,
 ) -> anyhow::Result<DiffContext> {
-    let mut seen = HashSet::with_capacity(entries.len());
-    let mut files = Vec::with_capacity(entries.len());
-    for entry in entries {
-        if !seen.insert(entry.filename.clone()) {
-            anyhow::bail!(
-                "GitHub returned duplicate changed file path: {}",
-                entry.filename
-            );
-        }
-        files.push(changed_file(entry));
-    }
-
-    let collected_file_count = files.len();
     let expected_file_count = expected_file_count
         .map(usize::try_from)
         .transpose()
         .context("PR changed_files count does not fit this platform")?;
-    let file_count = expected_file_count.unwrap_or(collected_file_count);
-    let mut full = String::new();
-    let mut by_file = HashMap::with_capacity(collected_file_count);
-
-    for file in &files {
-        writeln!(full, "--- {}", file.path).unwrap();
-        match &file.patch {
-            PatchAvailability::Present(patch) => {
-                full.push_str(patch);
-                by_file.insert(file.path.clone(), patch.clone());
-            }
-            PatchAvailability::Missing => full.push_str("[textual patch unavailable]"),
-        }
-        full.push('\n');
-    }
-
-    let mut plan = build_review_batches(&files, DEFAULT_BATCH_BYTES, DEFAULT_MAX_BATCHES);
-    if expected_file_count.is_some_and(|expected| expected != collected_file_count) {
-        plan.gaps.push(CoverageGap {
-            kind: crate::types::CoverageGapKind::GitHubFileListIncomplete,
-            file: "pull request".to_string(),
-            detail: format!(
-                "GitHub reported {file_count} changed files but the files endpoint returned {collected_file_count}; the endpoint is capped at 3,000 files"
-            ),
-            priority: crate::types::ReviewPriority::Prose,
-        });
-    }
-
-    Ok(DiffContext {
-        full,
-        by_file,
-        head_files: HashMap::new(),
-        file_count,
-        files,
-        batches: plan.batches,
-        coverage_gaps: plan.gaps,
-    })
+    let files = entries.into_iter().map(changed_file).collect();
+    DiffContext::from_changed_files(files, expected_file_count)
 }
 
 fn changed_file(entry: DiffEntry) -> ChangedFile {
@@ -338,32 +344,17 @@ pub async fn fetch_head_file(
         .and_then(|item| item.decoded_content()))
 }
 
-/// Fills `ctx.head_files` with the head content of every distinct file named by
-/// a line-located finding that also has a per-file patch. Failures degrade
-/// gracefully: a missing or unreadable file is simply skipped.
-pub async fn populate_head_files(
-    octo: &Octocrab,
-    owner: &str,
-    repo: &str,
-    sha: &str,
-    findings: &[SynthFinding],
-    ctx: &mut DiffContext,
-) {
-    let mut wanted: Vec<String> = findings
-        .iter()
-        .filter(|f| f.line > 0 && ctx.by_file.contains_key(&f.file))
-        .map(|f| f.file.clone())
-        .collect();
-    wanted.sort();
-    wanted.dedup();
-    for path in wanted {
-        match fetch_head_file(octo, owner, repo, &path, sha).await {
-            Ok(Some(content)) => {
-                ctx.head_files.insert(path, content);
-            }
-            Ok(None) => {}
-            Err(error) => eprintln!("warning: could not fetch head file {path}: {error}"),
-        }
+/// Reads head file contents from GitHub at a fixed commit.
+pub(crate) struct GitHubHeadFiles<'a> {
+    pub octo: &'a Octocrab,
+    pub owner: &'a str,
+    pub repo: &'a str,
+    pub sha: &'a str,
+}
+
+impl HeadFileSource for GitHubHeadFiles<'_> {
+    async fn read(&self, path: &str) -> anyhow::Result<Option<String>> {
+        fetch_head_file(self.octo, self.owner, self.repo, path, self.sha).await
     }
 }
 
@@ -742,6 +733,65 @@ mod tests {
     use crate::types::{Category, Severity, SynthFinding};
 
     const TWO_HUNK_PATCH: &str = "@@ -1,4 +1,5 @@\n fn main() {\n-    let x = 1;\n+    let x = 2;\n+    println!(\"{x}\");\n }\n@@ -10,3 +11,4 @@ fn helper()\n fn helper() {\n+    do_thing();\n }";
+
+    const SOURCE_PATCH: &str = "@@ -1,2 +1,3 @@
+ fn main() {
++    init();
+ }";
+
+    fn source_file(path: &str) -> ChangedFile {
+        ChangedFile {
+            path: path.to_string(),
+            status: ChangedFileStatus::Modified,
+            previous_path: None,
+            additions: 1,
+            deletions: 0,
+            patch: PatchAvailability::Present(SOURCE_PATCH.to_string()),
+            added_lines: parse_added_lines(SOURCE_PATCH),
+        }
+    }
+
+    #[test]
+    fn context_is_built_from_changed_files_alone() {
+        let context = DiffContext::from_changed_files(vec![source_file("src/lib.rs")], None)
+            .expect("context");
+        assert_eq!(context.file_count, 1);
+        assert_eq!(
+            context.by_file.get("src/lib.rs").map(String::as_str),
+            Some(SOURCE_PATCH)
+        );
+        assert!(context.full.starts_with(
+            "--- src/lib.rs
+"
+        ));
+        assert_eq!(context.batches.len(), 1);
+        assert_eq!(context.line_is_added_at("src/lib.rs", 2), Some(true));
+        assert!(context.head_files.is_empty());
+    }
+
+    #[test]
+    fn context_rejects_a_duplicate_changed_file_path() {
+        let error = DiffContext::from_changed_files(
+            vec![source_file("src/lib.rs"), source_file("src/lib.rs")],
+            None,
+        )
+        .err()
+        .expect("duplicate paths must be rejected");
+        assert!(error
+            .to_string()
+            .contains("duplicate changed file path: src/lib.rs"));
+    }
+
+    #[test]
+    fn context_reports_a_file_list_shorter_than_announced() {
+        let context = DiffContext::from_changed_files(vec![source_file("src/lib.rs")], Some(2))
+            .expect("context");
+        assert_eq!(context.file_count, 2);
+        assert!(context
+            .coverage_gaps
+            .iter()
+            .any(|gap| gap.kind == crate::types::CoverageGapKind::GitHubFileListIncomplete));
+    }
 
     fn finding_at(file: &str, line: u32) -> SynthFinding {
         SynthFinding {
