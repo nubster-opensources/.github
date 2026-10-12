@@ -160,3 +160,24 @@ async fn a_review_with_blocking_gaps_is_an_error_not_a_score() {
     assert_eq!(error.run, 4);
     assert!(error.to_string().contains("blocking coverage gaps"));
 }
+
+#[tokio::test]
+async fn a_bench_without_cases_is_an_error() {
+    let error = run_bench(&model(ONE_FINDING, false, false), &[], 3, 0)
+        .await
+        .expect_err("no case");
+    assert!(error.to_string().contains("no case"));
+}
+
+#[tokio::test]
+async fn a_bench_without_runs_is_an_error() {
+    let error = run_bench(
+        &model(ONE_FINDING, false, false),
+        &[case(vec![panic_bug()])],
+        0,
+        0,
+    )
+    .await
+    .expect_err("no run");
+    assert!(error.to_string().contains("run"));
+}

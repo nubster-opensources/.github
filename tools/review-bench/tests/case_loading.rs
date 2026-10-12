@@ -49,3 +49,18 @@ fn an_expected_bug_on_an_unknown_file_is_rejected() {
 fn loading_a_directory_reports_the_first_invalid_case() {
     assert!(load_cases(&fixture("")).is_err());
 }
+
+#[test]
+fn a_root_without_any_case_is_an_error() {
+    let error = load_cases(&fixture("valid-injected/patches")).expect_err("must fail");
+    assert!(format!("{error:#}").contains("no case found under"));
+}
+
+#[test]
+fn a_subdirectory_without_a_manifest_is_an_error() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/broken-root");
+    let error = load_cases(&root).expect_err("must fail");
+    let message = format!("{error:#}");
+    assert!(message.contains("missing-manifest"));
+    assert!(message.contains("case.toml"));
+}

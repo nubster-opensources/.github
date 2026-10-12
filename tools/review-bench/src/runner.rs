@@ -34,6 +34,35 @@ impl fmt::Display for IncompleteRun {
 
 impl std::error::Error for IncompleteRun {}
 
+/// A measure that cannot be taken.
+#[derive(Debug)]
+pub enum BenchError {
+    /// One review run cannot be scored.
+    Incomplete(IncompleteRun),
+    /// The corpus holds no case, so nothing would be measured.
+    NoCase,
+    /// Zero runs were requested, so nothing would be measured.
+    NoRun,
+}
+
+impl fmt::Display for BenchError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Incomplete(incomplete) => incomplete.fmt(formatter),
+            Self::NoCase => write!(formatter, "no case to run: the corpus is empty"),
+            Self::NoRun => write!(formatter, "no run requested: at least one run is required"),
+        }
+    }
+}
+
+impl std::error::Error for BenchError {}
+
+impl From<IncompleteRun> for BenchError {
+    fn from(incomplete: IncompleteRun) -> Self {
+        Self::Incomplete(incomplete)
+    }
+}
+
 /// Confirmed (non-contested) findings of one run, or why the run cannot be scored.
 ///
 /// # Errors
@@ -98,13 +127,20 @@ pub struct BenchScore {
 ///
 /// # Errors
 ///
-/// Returns the first [`IncompleteRun`] met.
+/// Returns [`BenchError::NoCase`] or [`BenchError::NoRun`] when nothing would be
+/// measured, and [`BenchError::Incomplete`] for the first incomplete run met.
 pub async fn run_bench<M: LanguageModel>(
     model: &Arc<M>,
     cases: &[BenchCase],
     runs: usize,
     window: u32,
-) -> Result<BenchScore, IncompleteRun> {
+) -> Result<BenchScore, BenchError> {
+    if cases.is_empty() {
+        return Err(BenchError::NoCase);
+    }
+    if runs == 0 {
+        return Err(BenchError::NoRun);
+    }
     let mut run_scores = Vec::with_capacity(runs);
     for run in 1..=runs {
         let mut per_case = Vec::with_capacity(cases.len());

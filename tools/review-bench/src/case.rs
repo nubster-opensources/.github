@@ -249,16 +249,27 @@ pub fn load_case(directory: &Path) -> Result<BenchCase> {
 ///
 /// # Errors
 ///
-/// Fails on the first case that cannot be loaded.
+/// Fails when a subdirectory has no `case.toml`, when no case is found at all,
+/// or on the first case that cannot be loaded.
 pub fn load_cases(root: &Path) -> Result<Vec<BenchCase>> {
     let mut directories = Vec::new();
     for entry in std::fs::read_dir(root)
         .with_context(|| format!("cannot list cases under `{}`", root.display()))?
     {
         let path = entry?.path();
-        if path.is_dir() && path.join("case.toml").is_file() {
-            directories.push(path);
+        if !path.is_dir() {
+            continue;
         }
+        if !path.join("case.toml").is_file() {
+            bail!(
+                "directory `{}` holds no case.toml, every subdirectory of the corpus must be a case",
+                path.display()
+            );
+        }
+        directories.push(path);
+    }
+    if directories.is_empty() {
+        bail!("no case found under `{}`", root.display());
     }
     directories.sort();
     directories
