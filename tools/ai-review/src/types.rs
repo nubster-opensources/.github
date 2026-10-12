@@ -36,6 +36,34 @@ pub struct ChangedFile {
 }
 
 impl ChangedFile {
+    /// Builds a changed file whose added lines are always derived from its patch.
+    /// An empty or absent patch is recorded as missing.
+    #[must_use]
+    pub fn from_patch(
+        path: String,
+        status: ChangedFileStatus,
+        diff_patch: Option<String>,
+        additions: u64,
+        deletions: u64,
+    ) -> Self {
+        let availability = diff_patch
+            .filter(|text| !text.is_empty())
+            .map_or(PatchAvailability::Missing, PatchAvailability::Present);
+        let added_lines = match &availability {
+            PatchAvailability::Present(text) => crate::diff_context::parse_added_lines(text),
+            PatchAvailability::Missing => BTreeSet::new(),
+        };
+        Self {
+            path,
+            status,
+            previous_path: None,
+            additions,
+            deletions,
+            patch: availability,
+            added_lines,
+        }
+    }
+
     /// Whether a missing patch is explained by the file holding binary content.
     ///
     /// The files endpoint omits the patch for two unrelated reasons, binary
@@ -567,5 +595,44 @@ mod tests {
             gap(CoverageGapKind::PatchUnavailable, ReviewPriority::Prose).is_blocking(),
             "every other gap kind still blocks regardless of priority"
         );
+    }
+
+    const TWO_ADDED_LINES: &str = "@@ -1,2 +1,4 @@
+ fn main() {
++    first();
++    second();
+ }";
+
+    #[test]
+    fn a_file_built_from_its_patch_derives_the_added_lines() {
+        let file = ChangedFile::from_patch(
+            "src/lib.rs".to_string(),
+            ChangedFileStatus::Modified,
+            Some(TWO_ADDED_LINES.to_string()),
+            2,
+            0,
+        );
+        assert_eq!(file.added_lines, BTreeSet::from([2, 3]));
+        assert_eq!(
+            file.patch,
+            PatchAvailability::Present(TWO_ADDED_LINES.to_string())
+        );
+        assert_eq!(file.previous_path, None);
+    }
+
+    #[test]
+    fn an_empty_or_absent_patch_is_recorded_as_missing() {
+        for patch in [None, Some(String::new())] {
+            let file = ChangedFile::from_patch(
+                "assets/logo.png".to_string(),
+                ChangedFileStatus::Added,
+                patch,
+                0,
+                0,
+            );
+            assert_eq!(file.patch, PatchAvailability::Missing);
+            assert!(file.added_lines.is_empty());
+            assert!(file.has_binary_content());
+        }
     }
 }

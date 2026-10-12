@@ -1,15 +1,15 @@
 #![allow(clippy::missing_errors_doc)]
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, HashSet};
 
 use anyhow::Context;
 use octocrab::models::repos::{DiffEntry, DiffEntryStatus};
 use octocrab::Octocrab;
 
-use crate::diff_context::{parse_added_lines, DiffContext};
+use crate::diff_context::DiffContext;
 use crate::head_file_source::HeadFileSource;
 use crate::review::has_bot_marker;
-use crate::types::{ChangedFile, ChangedFileStatus, PatchAvailability};
+use crate::types::{ChangedFile, ChangedFileStatus};
 
 /// An inline comment to post on a specific file line.
 pub struct InlineComment {
@@ -56,23 +56,15 @@ fn build_diff_context(
 }
 
 fn changed_file(entry: DiffEntry) -> ChangedFile {
-    let patch = entry
-        .patch
-        .filter(|patch| !patch.is_empty())
-        .map_or(PatchAvailability::Missing, PatchAvailability::Present);
-    let added_lines = match &patch {
-        PatchAvailability::Present(text) => parse_added_lines(text),
-        PatchAvailability::Missing => BTreeSet::new(),
-    };
-    ChangedFile {
-        path: entry.filename,
-        status: changed_file_status(&entry.status),
-        previous_path: entry.previous_filename,
-        additions: entry.additions,
-        deletions: entry.deletions,
-        patch,
-        added_lines,
-    }
+    let mut file = ChangedFile::from_patch(
+        entry.filename,
+        changed_file_status(&entry.status),
+        entry.patch,
+        entry.additions,
+        entry.deletions,
+    );
+    file.previous_path = entry.previous_filename;
+    file
 }
 
 fn changed_file_status(status: &DiffEntryStatus) -> ChangedFileStatus {
@@ -542,6 +534,7 @@ pub async fn update_pr_body(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::PatchAvailability;
 
     #[test]
     fn builds_context_for_all_thirty_one_files() {
