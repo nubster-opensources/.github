@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use crate::github::{parse_added_lines, DiffContext};
+use crate::diff_context::{parse_added_lines, DiffContext};
 use crate::head_file_source::HeadFileSource;
 use crate::language_model::{CallPurpose, ChatRequest, LanguageModel};
 use crate::types::{ChangedFile, ChangedFileStatus, PatchAvailability};

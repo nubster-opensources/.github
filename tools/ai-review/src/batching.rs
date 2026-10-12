@@ -488,7 +488,7 @@ mod tests {
         for index in 0..20 {
             writeln!(patch, "+ligne {index} 🙂").expect("write fixture");
         }
-        let expected_added = crate::github::parse_added_lines(&patch);
+        let expected_added = crate::diff_context::parse_added_lines(&patch);
         let plan = build_review_batches(
             &[changed(
                 "unicode.rs",
@@ -514,7 +514,7 @@ mod tests {
         let actual_added: BTreeSet<_> = plan
             .batches
             .iter()
-            .flat_map(|batch| crate::github::parse_added_lines(&batch.content))
+            .flat_map(|batch| crate::diff_context::parse_added_lines(&batch.content))
             .collect();
         assert_eq!(actual_added, expected_added);
     }

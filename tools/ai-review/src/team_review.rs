@@ -7,7 +7,7 @@ use std::sync::Arc;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
-use crate::github::DiffContext;
+use crate::diff_context::DiffContext;
 use crate::head_file_source::HeadFileSource;
 use crate::language_model::LanguageModel;
 use crate::mistral;
@@ -620,6 +620,7 @@ mod tests {
 
     use super::*;
     use crate::language_model::{CallPurpose, ChatRequest};
+    use crate::team_cache;
     use crate::team_cache::ReviewCache;
     use crate::test_support::ScriptedModel;
     use crate::test_support::{review_context, source_file, MapHeadFiles};
@@ -627,7 +628,6 @@ mod tests {
     use crate::types::{
         ChangedFile, ChangedFileStatus, CoverageGapKind, FindingVerdict, PatchAvailability, Verdict,
     };
-    use crate::{github, team_cache};
     use std::sync::Arc;
 
     const PATCH: &str = "@@ -1,2 +1,3 @@\n fn main() {\n+    init();\n }";
@@ -1102,10 +1102,10 @@ mod tests {
         }
     }
 
-    fn diff_ctx(file: &str, patch: &str) -> github::DiffContext {
+    fn diff_ctx(file: &str, patch: &str) -> crate::diff_context::DiffContext {
         let mut by_file = std::collections::HashMap::new();
         by_file.insert(file.to_string(), patch.to_string());
-        github::DiffContext {
+        crate::diff_context::DiffContext {
             full: format!("--- {file}\n{patch}\n"),
             by_file,
             head_files: std::collections::HashMap::new(),
@@ -1117,7 +1117,7 @@ mod tests {
                 additions: 1,
                 deletions: 0,
                 patch: crate::types::PatchAvailability::Present(patch.to_string()),
-                added_lines: github::parse_added_lines(patch),
+                added_lines: crate::diff_context::parse_added_lines(patch),
             }],
             batches: vec![],
             coverage_gaps: vec![],

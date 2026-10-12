@@ -127,7 +127,7 @@ async fn handle_empty_review_input(
     owner: &str,
     repo: &str,
     pr_number: u64,
-    ctx: &github::DiffContext,
+    ctx: &crate::diff_context::DiffContext,
 ) -> anyhow::Result<()> {
     if ctx.coverage_gaps.is_empty() {
         println!("Empty diff: nothing to review.");
@@ -192,7 +192,7 @@ async fn load_team_cache(
     owner: &str,
     repo: &str,
     pr_number: u64,
-    ctx: &github::DiffContext,
+    ctx: &crate::diff_context::DiffContext,
 ) -> anyhow::Result<TeamCacheState> {
     let reviewer_revision = std::env::var("AI_REVIEW_REVISION")
         .ok()
@@ -225,7 +225,7 @@ async fn load_team_cache(
 fn append_team_cache(
     body: &mut String,
     state: &TeamCacheState,
-    ctx: &github::DiffContext,
+    ctx: &crate::diff_context::DiffContext,
     scored: &[(SynthFinding, FindingVerdict)],
     cacheable: Vec<bool>,
     has_incomplete_coverage: bool,
@@ -266,7 +266,7 @@ async fn post_confirmed_inline(
     repo: &str,
     pr_number: u64,
     head_sha: &str,
-    ctx: &github::DiffContext,
+    ctx: &crate::diff_context::DiffContext,
     scored: &[(SynthFinding, FindingVerdict)],
 ) -> anyhow::Result<()> {
     let inline: Vec<github::InlineComment> = scored

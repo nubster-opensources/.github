@@ -1,6 +1,7 @@
 //! Pull request review and description tooling powered by the Mistral API.
 
 mod batching;
+mod diff_context;
 mod github;
 mod head_file_source;
 mod language_model;

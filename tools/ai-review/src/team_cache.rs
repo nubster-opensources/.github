@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fmt::Write as _;
 
-use crate::github::DiffContext;
+use crate::diff_context::DiffContext;
 use crate::types::{FindingVerdict, PatchAvailability, Severity, SynthFinding};
 
 const CACHE_SCHEMA: u8 = 1;
