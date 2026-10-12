@@ -11,6 +11,10 @@ use crate::runner::BenchScore;
 pub struct Baseline {
     /// Number of lines around a bug within which a finding still validates it.
     pub window: u32,
+    /// Number of cases of the corpus the reference was measured on.
+    pub cases: usize,
+    /// Total expected bugs of the corpus the reference was measured on.
+    pub expected_bugs: usize,
     /// Median number of expected bugs found by the reference run.
     pub found: usize,
     /// Median number of false alerts of the reference run.
@@ -35,17 +39,26 @@ impl Baseline {
     /// Parses a baseline from TOML text.
     ///
     /// # Errors
-    /// Returns an error when the text is not a valid baseline.
+    /// Returns an error when the text is not a valid baseline or a tolerance is zero.
     pub fn from_toml(text: &str) -> anyhow::Result<Self> {
-        Ok(toml::from_str(text)?)
+        let baseline: Self = toml::from_str(text)?;
+        if baseline.found_drop_tolerance == 0 {
+            anyhow::bail!("`found_drop_tolerance` must be at least 1");
+        }
+        if baseline.false_alert_rise_tolerance == 0 {
+            anyhow::bail!("`false_alert_rise_tolerance` must be at least 1");
+        }
+        Ok(baseline)
     }
 
     /// Serializes the baseline as TOML text.
     #[must_use]
     pub fn to_toml(&self) -> String {
         format!(
-            "window = {}\nfound = {}\nfalse_alerts = {}\nfound_drop_tolerance = {}\nfalse_alert_rise_tolerance = {}\n",
+            "window = {}\ncases = {}\nexpected_bugs = {}\nfound = {}\nfalse_alerts = {}\nfound_drop_tolerance = {}\nfalse_alert_rise_tolerance = {}\n",
             self.window,
+            self.cases,
+            self.expected_bugs,
             self.found,
             self.false_alerts,
             self.found_drop_tolerance,
@@ -64,6 +77,19 @@ pub enum GateVerdict {
         /// Baseline built from the measured medians.
         suggested: Baseline,
     },
+    /// The corpus is not the one the baseline was measured on; the gate cannot judge.
+    CorpusChanged {
+        /// Number of cases the baseline pins.
+        expected_cases: usize,
+        /// Number of cases actually loaded.
+        actual_cases: usize,
+        /// Number of expected bugs the baseline pins.
+        expected_bugs: usize,
+        /// Number of expected bugs actually loaded.
+        actual_bugs: usize,
+        /// Baseline built from the measure on the loaded corpus.
+        suggested: Baseline,
+    },
     /// The measure crosses a tolerance.
     Regression {
         /// Number of found bugs lost against the baseline.
@@ -74,8 +100,21 @@ pub enum GateVerdict {
 }
 
 /// Compares the median of a measure to the baseline.
+///
+/// A corpus that differs from the pinned one is reported first. A regression is
+/// then judged on both axes. An improvement is reported only when neither axis
+/// got worse, so that the suggested baseline never lowers the bar.
 #[must_use]
 pub fn compare(score: &BenchScore, baseline: &Baseline) -> GateVerdict {
+    if score.cases != baseline.cases || score.expected_bugs != baseline.expected_bugs {
+        return GateVerdict::CorpusChanged {
+            expected_cases: baseline.cases,
+            actual_cases: score.cases,
+            expected_bugs: baseline.expected_bugs,
+            actual_bugs: score.expected_bugs,
+            suggested: suggest(score, baseline),
+        };
+    }
     let found_drop = baseline.found.saturating_sub(score.median_found);
     let false_alert_rise = score
         .median_false_alerts
@@ -88,16 +127,26 @@ pub fn compare(score: &BenchScore, baseline: &Baseline) -> GateVerdict {
             false_alert_rise,
         };
     }
-    if score.median_found > baseline.found || score.median_false_alerts < baseline.false_alerts {
+    let no_worse =
+        score.median_found >= baseline.found && score.median_false_alerts <= baseline.false_alerts;
+    let strictly_better =
+        score.median_found > baseline.found || score.median_false_alerts < baseline.false_alerts;
+    if no_worse && strictly_better {
         return GateVerdict::Improved {
-            suggested: Baseline {
-                found: score.median_found,
-                false_alerts: score.median_false_alerts,
-                ..baseline.clone()
-            },
+            suggested: suggest(score, baseline),
         };
     }
     GateVerdict::Pass
+}
+
+fn suggest(score: &BenchScore, baseline: &Baseline) -> Baseline {
+    Baseline {
+        cases: score.cases,
+        expected_bugs: score.expected_bugs,
+        found: score.median_found,
+        false_alerts: score.median_false_alerts,
+        ..baseline.clone()
+    }
 }
 
 #[cfg(test)]
@@ -109,6 +158,8 @@ mod tests {
     fn baseline() -> Baseline {
         Baseline {
             window: 3,
+            cases: 5,
+            expected_bugs: 12,
             found: 10,
             false_alerts: 4,
             found_drop_tolerance: 2,
@@ -121,6 +172,7 @@ mod tests {
             runs: Vec::new(),
             median_found: found,
             median_false_alerts: false_alerts,
+            cases: 5,
             expected_bugs: 12,
         }
     }
@@ -159,6 +211,95 @@ mod tests {
         };
         assert_eq!(suggested.found, 11);
         assert_eq!(suggested.window, 3);
+    }
+
+    #[test]
+    fn found_up_with_alerts_up_below_the_tolerance_is_not_an_improvement() {
+        assert_eq!(compare(&score(11, 6), &baseline()), GateVerdict::Pass);
+    }
+
+    #[test]
+    fn found_down_with_alerts_down_is_not_an_improvement() {
+        assert_eq!(compare(&score(9, 3), &baseline()), GateVerdict::Pass);
+    }
+
+    #[test]
+    fn alerts_up_below_the_tolerance_with_found_equal_passes() {
+        assert_eq!(compare(&score(10, 6), &baseline()), GateVerdict::Pass);
+    }
+
+    #[test]
+    fn found_up_with_alerts_up_to_the_tolerance_is_a_regression() {
+        assert_eq!(
+            compare(&score(12, 7), &baseline()),
+            GateVerdict::Regression {
+                found_drop: 0,
+                false_alert_rise: 3
+            }
+        );
+    }
+
+    #[test]
+    fn fewer_false_alerts_alone_suggest_a_new_baseline() {
+        let GateVerdict::Improved { suggested } = compare(&score(10, 3), &baseline()) else {
+            panic!("expected an improvement");
+        };
+        assert_eq!(suggested.false_alerts, 3);
+        assert_eq!(suggested.found, 10);
+    }
+
+    #[test]
+    fn a_different_number_of_cases_is_reported_as_a_changed_corpus() {
+        let mut changed = score(10, 4);
+        changed.cases = 6;
+        let GateVerdict::CorpusChanged {
+            expected_cases,
+            actual_cases,
+            expected_bugs,
+            actual_bugs,
+            suggested,
+        } = compare(&changed, &baseline())
+        else {
+            panic!("expected a changed corpus");
+        };
+        assert_eq!((expected_cases, actual_cases), (5, 6));
+        assert_eq!((expected_bugs, actual_bugs), (12, 12));
+        assert_eq!(suggested.cases, 6);
+    }
+
+    #[test]
+    fn a_different_number_of_expected_bugs_is_reported_as_a_changed_corpus() {
+        let mut changed = score(10, 4);
+        changed.expected_bugs = 13;
+        let GateVerdict::CorpusChanged {
+            actual_bugs,
+            suggested,
+            ..
+        } = compare(&changed, &baseline())
+        else {
+            panic!("expected a changed corpus");
+        };
+        assert_eq!(actual_bugs, 13);
+        assert_eq!(suggested.expected_bugs, 13);
+    }
+
+    #[test]
+    fn a_zero_found_tolerance_is_rejected() {
+        let text = baseline()
+            .to_toml()
+            .replace("found_drop_tolerance = 2", "found_drop_tolerance = 0");
+        let error = Baseline::from_toml(&text).expect_err("must fail");
+        assert!(format!("{error:#}").contains("found_drop_tolerance"));
+    }
+
+    #[test]
+    fn a_zero_false_alert_tolerance_is_rejected() {
+        let text = baseline().to_toml().replace(
+            "false_alert_rise_tolerance = 3",
+            "false_alert_rise_tolerance = 0",
+        );
+        let error = Baseline::from_toml(&text).expect_err("must fail");
+        assert!(format!("{error:#}").contains("false_alert_rise_tolerance"));
     }
 
     #[test]

@@ -63,7 +63,12 @@ async fn main() -> ExitCode {
     };
     let api_key = std::env::var("MISTRAL_API_KEY").unwrap_or_default();
     if api_key.trim().is_empty() {
-        println!("not measured: MISTRAL_API_KEY is missing");
+        let line = "not measured: MISTRAL_API_KEY is missing";
+        println!("{line}");
+        append_to_step_summary(&format!(
+            "{line}
+"
+        ));
         return ExitCode::from(MEASURE_IMPOSSIBLE);
     }
     let baseline = match Baseline::load(&arguments.baseline) {
@@ -100,6 +105,7 @@ async fn main() -> ExitCode {
     append_to_step_summary(&summary);
     match verdict {
         GateVerdict::Regression { .. } => ExitCode::from(1),
+        GateVerdict::CorpusChanged { .. } => ExitCode::from(MEASURE_IMPOSSIBLE),
         GateVerdict::Pass | GateVerdict::Improved { .. } => ExitCode::SUCCESS,
     }
 }

@@ -119,6 +119,8 @@ pub struct BenchScore {
     pub median_found: usize,
     /// Median of the false alerts per run.
     pub median_false_alerts: usize,
+    /// Number of cases measured.
+    pub cases: usize,
     /// Total expected bugs over all cases.
     pub expected_bugs: usize,
 }
@@ -165,6 +167,7 @@ pub async fn run_bench<M: LanguageModel>(
         runs: run_scores,
         median_found: median(&founds),
         median_false_alerts: median(&alerts),
+        cases: cases.len(),
         expected_bugs: cases.iter().map(|case| case.expected_bugs.len()).sum(),
     })
 }
