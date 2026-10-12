@@ -152,9 +152,9 @@ fn validate(manifest: &CaseManifest) -> Result<()> {
                 bug.file
             ),
         }
-        if bug.keywords.is_empty() {
+        if bug.keywords.is_empty() || bug.keywords.iter().any(|keyword| keyword.trim().is_empty()) {
             bail!(
-                "expected bug on `{}`: `keywords` must not be empty",
+                "expected bug on `{}`: `keywords` must hold at least one keyword and no blank keyword",
                 bug.file
             );
         }
@@ -228,7 +228,11 @@ pub fn load_case(directory: &Path) -> Result<BenchCase> {
             file: bug.file.clone(),
             first_line: bug.lines[0],
             last_line: bug.lines[1],
-            keywords: bug.keywords.clone(),
+            keywords: bug
+                .keywords
+                .iter()
+                .map(|keyword| keyword.trim().to_string())
+                .collect(),
         })
         .collect();
 
@@ -277,6 +281,38 @@ mod tests {
     #[test]
     fn an_expected_bug_without_keywords_is_rejected() {
         let error = parse_case("bad", "origin = \"injected\"\n[[files]]\npath = \"a.rs\"\nstatus = \"modified\"\nadditions = 1\ndeletions = 0\n[[expected_bugs]]\nfile = \"a.rs\"\nlines = [1, 1]\nkeywords = []\n")
+            .expect_err("must fail");
+        assert!(format!("{error:#}").contains("keywords"));
+    }
+
+    fn manifest_with_keywords(keywords: &str) -> String {
+        format!(
+            "origin = \"injected\"
+[[files]]
+path = \"a.rs\"
+status = \"modified\"
+additions = 1
+deletions = 0
+[[expected_bugs]]
+file = \"a.rs\"
+lines = [1, 1]
+keywords = {keywords}
+"
+        )
+    }
+
+    #[test]
+    fn an_empty_keyword_is_rejected() {
+        let error =
+            parse_case("bad-case", &manifest_with_keywords("[\"\"]")).expect_err("must fail");
+        let message = format!("{error:#}");
+        assert!(message.contains("keywords"));
+        assert!(message.contains("bad-case"));
+    }
+
+    #[test]
+    fn a_blank_keyword_is_rejected() {
+        let error = parse_case("bad-case", &manifest_with_keywords("[\"x\", \"  \"]"))
             .expect_err("must fail");
         assert!(format!("{error:#}").contains("keywords"));
     }
