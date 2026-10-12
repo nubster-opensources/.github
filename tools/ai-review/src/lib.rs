@@ -16,6 +16,16 @@ mod test_support;
 mod text;
 mod types;
 
+pub use diff_context::DiffContext;
+pub use head_file_source::HeadFileSource;
+pub use language_model::{CallPurpose, ChatRequest, LanguageModel, Message};
+pub use mistral_http::MistralHttp;
+pub use team_review::{run_team_review, TeamOutcome, TeamReview, TeamReviewInput};
+pub use types::{
+    Agent, Category, ChangedFile, ChangedFileStatus, CoverageGap, CoverageGapKind, FindingVerdict,
+    Lens, PatchAvailability, ReviewPriority, Severity, SynthFinding, Verdict,
+};
+
 use anyhow::Context;
 use github::InlineComment;
 use octocrab::OctocrabBuilder;

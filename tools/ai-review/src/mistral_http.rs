@@ -15,7 +15,7 @@ const RETRY_DELAY_MILLIS: u64 = 250;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Mistral chat-completion API adapter for the [`LanguageModel`] port.
-pub(crate) struct MistralHttp {
+pub struct MistralHttp {
     client: reqwest::Client,
     api_key: String,
     endpoint: String,
@@ -23,7 +23,11 @@ pub(crate) struct MistralHttp {
 
 impl MistralHttp {
     /// Builds the adapter with the production endpoint and request timeout.
-    pub(crate) fn new(api_key: String) -> anyhow::Result<Self> {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the HTTP client cannot be built.
+    pub fn new(api_key: String) -> anyhow::Result<Self> {
         let client = reqwest::Client::builder()
             .user_agent("ai-review-bot/0.1")
             .timeout(REQUEST_TIMEOUT)

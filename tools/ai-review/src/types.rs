@@ -5,12 +5,19 @@ use serde::{Deserialize, Serialize};
 /// Normalised status of a file changed by a pull request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChangedFileStatus {
+    /// File added by the pull request.
     Added,
+    /// File removed by the pull request.
     Removed,
+    /// File modified in place.
     Modified,
+    /// File renamed, possibly with edits.
     Renamed,
+    /// File copied from another path.
     Copied,
+    /// File whose mode or type changed.
     Changed,
+    /// File listed without any change.
     Unchanged,
 }
 
@@ -70,6 +77,7 @@ impl ChangedFile {
     /// content and a diff too large to inline, and separates them only through
     /// the line counts: binary content reports none, an omitted patch keeps
     /// its own. A file whose patch is present is never in question.
+    #[must_use]
     pub fn has_binary_content(&self) -> bool {
         matches!(self.patch, PatchAvailability::Missing)
             && self.additions == 0
@@ -80,21 +88,32 @@ impl ChangedFile {
 /// Reason why part of a pull request could not be put in a model batch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CoverageGapKind {
+    /// The forge returned no textual patch for the file.
     PatchUnavailable,
+    /// The file holds binary content with no textual patch.
     BinaryContent,
+    /// The patch could not be parsed.
     MalformedPatch,
+    /// The input did not fit in the model batch budget.
     BatchBudgetExceeded,
+    /// A single line exceeded the batch budget.
     OversizedLine,
+    /// A specialist agent failed on a batch.
     AgentFailed,
+    /// The synthesis of a batch failed.
     SynthesisFailed,
+    /// The forge file list was incomplete.
     GitHubFileListIncomplete,
 }
 
 /// Ranks review input by how much a missed review would cost.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ReviewPriority {
+    /// Source code, the costliest input to miss.
     SourceCode,
+    /// Configuration files.
     Configuration,
+    /// Documentation and other prose.
     Prose,
 }
 
@@ -118,6 +137,7 @@ impl CoverageGap {
     /// request permanently red for cutting text nobody needed to read. Every
     /// other kind marks text a reviewer needed and did not get, so the run
     /// cannot honestly claim to have covered the change.
+    #[must_use]
     pub fn is_blocking(&self) -> bool {
         match self.kind {
             CoverageGapKind::BinaryContent => false,
@@ -138,7 +158,9 @@ pub struct ReviewBatch {
 #[derive(Debug, Deserialize, Clone, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum Severity {
+    /// A problem that must be fixed before merging.
     Critical,
+    /// A problem worth fixing that does not block the merge.
     Minor,
 }
 
@@ -219,14 +241,19 @@ impl Mode {
 /// One of the four specialised review angles run in parallel in team mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Agent {
+    /// Reviews logic and correctness.
     Correctness,
+    /// Reviews security.
     Security,
+    /// Reviews design and structure.
     Architecture,
+    /// Reviews performance.
     Performance,
 }
 
 impl Agent {
     /// Returns the human-readable label for this agent.
+    #[must_use]
     pub fn label(self) -> &'static str {
         match self {
             Self::Correctness => "Correctness",
@@ -240,13 +267,17 @@ impl Agent {
 /// One adversarial lens applied to a synthesised finding during verification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Lens {
+    /// Checks that the code confirms the finding.
     CodeConfirms,
+    /// Checks that the finding has a real impact.
     RealImpact,
+    /// Looks for reasons the finding is a false positive.
     FalsePositive,
 }
 
 impl Lens {
     /// Returns the human-readable label for this lens.
+    #[must_use]
     pub fn label(self) -> &'static str {
         match self {
             Self::CodeConfirms => "code-confirms",
@@ -260,17 +291,24 @@ impl Lens {
 #[derive(Debug, Deserialize, Clone, Copy, PartialEq)]
 #[serde(rename_all = "kebab-case")]
 pub enum Category {
+    /// A defect in behaviour.
     Bug,
+    /// A security weakness.
     Security,
+    /// A design or structure issue.
     Design,
+    /// A performance issue.
     Performance,
+    /// Missing test coverage.
     TestGap,
     #[serde(other)]
+    /// Any other kind of issue.
     Other,
 }
 
 impl Category {
     /// Returns the human-readable label for this category.
+    #[must_use]
     pub fn label(self) -> &'static str {
         match self {
             Self::Bug => "bug",
@@ -335,9 +373,13 @@ pub struct FindingVerdict {
 /// Final overall verdict computed deterministically after verification.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Verdict {
+    /// Nothing blocks the merge.
     Ship,
+    /// Confirmed critical findings block the merge.
     NeedsWork,
+    /// Only contested or minor findings remain.
     Discuss,
+    /// Coverage was incomplete, so the run cannot vouch for the change.
     Incomplete,
 }
 

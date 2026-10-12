@@ -25,16 +25,29 @@ pub(crate) const ALL_AGENTS_FAILED_REASON: &str = "all specialist agents failed"
 pub(crate) const ALL_SYNTHESES_FAILED_REASON: &str = "every batch synthesis failed";
 
 /// Everything the team review needs from the caller.
-pub(crate) struct TeamReviewInput<'a> {
-    pub context: DiffContext,
-    pub previous_cache: Option<&'a ReviewCache>,
+pub struct TeamReviewInput<'a> {
+    pub(crate) context: DiffContext,
+    pub(crate) previous_cache: Option<&'a ReviewCache>,
+}
+
+impl TeamReviewInput<'static> {
+    /// Input for a run that reuses no previous verdict.
+    #[must_use]
+    pub fn without_cache(context: DiffContext) -> Self {
+        Self {
+            context,
+            previous_cache: None,
+        }
+    }
 }
 
 /// Result of a team review run.
-pub(crate) enum TeamOutcome {
+pub enum TeamOutcome {
     /// The review could not be completed; the caller publishes the gaps.
     Incomplete {
+        /// Why the review could not be completed.
         reason: &'static str,
+        /// Review input that was not analysed.
         coverage_gaps: Vec<CoverageGap>,
     },
     /// The review ran; `TeamReview::synthesis.findings` is empty because the
@@ -43,18 +56,45 @@ pub(crate) enum TeamOutcome {
 }
 
 /// A completed team review, ready to be rendered and published.
-pub(crate) struct TeamReview {
-    pub context: DiffContext,
-    pub synthesis: SynthReport,
-    pub scored: Vec<(SynthFinding, FindingVerdict)>,
-    pub verdict: Verdict,
-    pub agents_ok: Vec<Agent>,
-    pub agents_failed: Vec<Agent>,
-    pub raw_count: usize,
-    pub dedup_count: usize,
-    pub capped: usize,
-    pub has_incomplete_coverage: bool,
-    pub cacheable: Vec<bool>,
+pub struct TeamReview {
+    pub(crate) context: DiffContext,
+    pub(crate) synthesis: SynthReport,
+    pub(crate) scored: Vec<(SynthFinding, FindingVerdict)>,
+    pub(crate) verdict: Verdict,
+    pub(crate) agents_ok: Vec<Agent>,
+    pub(crate) agents_failed: Vec<Agent>,
+    pub(crate) raw_count: usize,
+    pub(crate) dedup_count: usize,
+    pub(crate) capped: usize,
+    pub(crate) has_incomplete_coverage: bool,
+    pub(crate) cacheable: Vec<bool>,
+}
+
+impl TeamReview {
+    /// Whether every review input that could be read was covered; a reviewed
+    /// run with blocking gaps or a dropped critical finding is not complete.
+    #[must_use]
+    pub fn is_complete(&self) -> bool {
+        !self.has_incomplete_coverage
+    }
+
+    /// Findings with their verification verdict.
+    #[must_use]
+    pub fn scored(&self) -> &[(SynthFinding, FindingVerdict)] {
+        &self.scored
+    }
+
+    /// Overall verdict of the run.
+    #[must_use]
+    pub fn verdict(&self) -> Verdict {
+        self.verdict
+    }
+
+    /// Review input that was not analysed.
+    #[must_use]
+    pub fn coverage_gaps(&self) -> &[CoverageGap] {
+        &self.context.coverage_gaps
+    }
 }
 
 /// Fills `context.head_files` with the head content of every distinct file
@@ -86,7 +126,7 @@ pub(crate) async fn populate_head_files<H: HeadFileSource>(
 /// Runs the multi-agent team review over `input.context`: specialist agents per
 /// batch, synthesis, verification cap, head file reads, three-lens vote and the
 /// deterministic verdict. Never touches the forge: the caller fetches and publishes.
-pub(crate) async fn run_team_review<M: LanguageModel, H: HeadFileSource>(
+pub async fn run_team_review<M: LanguageModel, H: HeadFileSource>(
     language_model: &Arc<M>,
     head_files: &H,
     input: TeamReviewInput<'_>,
@@ -1301,5 +1341,23 @@ mod tests {
             coverage_is_incomplete(&[], &[budget_gap(ReviewPriority::SourceCode)]),
             "the budget cut source code, so the review cannot be declared complete"
         );
+    }
+
+    #[tokio::test]
+    async fn a_reviewed_run_with_blocking_gaps_is_not_complete() {
+        let synthesis = synthesis_with(&[]);
+        let model = Arc::new(ScriptedModel::new(
+            move |request: &ChatRequest| match request.purpose {
+                CallPurpose::Agent(Agent::Security) => anyhow::bail!("agent down"),
+                CallPurpose::Agent(_) => Ok(AGENT_REPORT.to_string()),
+                CallPurpose::Synthesis => Ok(synthesis.clone()),
+                other => anyhow::bail!("unexpected call {other:?}"),
+            },
+        ));
+        let context = review_context(vec![source_file("src/lib.rs", PATCH)]);
+
+        let review = reviewed(run_team_review(&model, &no_head_files(), input(context)).await);
+
+        assert!(!review.is_complete());
     }
 }

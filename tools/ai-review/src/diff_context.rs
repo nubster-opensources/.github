@@ -29,6 +29,10 @@ impl DiffContext {
     /// Builds the review context from changed files already normalised away from
     /// any forge type, so a caller other than the GitHub adapter can feed the
     /// review core.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when two changed files share the same path.
     pub fn from_changed_files(
         files: Vec<ChangedFile>,
         expected_file_count: Option<usize>,
