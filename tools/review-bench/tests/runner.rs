@@ -2,7 +2,9 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use ai_review::{CallPurpose, ChangedFile, ChangedFileStatus, ChatRequest, LanguageModel, Lens};
+use ai_review::{
+    Agent, CallPurpose, ChangedFile, ChangedFileStatus, ChatRequest, LanguageModel, Lens,
+};
 use review_bench::case::{BenchCase, CaseOrigin, ExpectedBug};
 use review_bench::runner::{median, run_bench, run_case};
 
@@ -14,6 +16,7 @@ struct ScriptModel {
     synthesis: String,
     contested_lens: bool,
     failing_agent: bool,
+    failing_security_agent: bool,
     calls: AtomicUsize,
 }
 
@@ -21,6 +24,9 @@ impl LanguageModel for ScriptModel {
     async fn complete(&self, request: &ChatRequest) -> anyhow::Result<String> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         match request.purpose() {
+            CallPurpose::Agent(Agent::Security) if self.failing_security_agent => {
+                anyhow::bail!("security agent down")
+            }
             CallPurpose::Agent(_) if self.failing_agent => anyhow::bail!("agent down"),
             CallPurpose::Agent(_) => Ok(AGENT_REPORT.to_string()),
             CallPurpose::Synthesis => Ok(self.synthesis.clone()),
@@ -38,6 +44,7 @@ fn model(synthesis: &str, contested_lens: bool, failing_agent: bool) -> Arc<Scri
         synthesis: synthesis.to_string(),
         contested_lens,
         failing_agent,
+        failing_security_agent: false,
         calls: AtomicUsize::new(0),
     })
 }
@@ -135,4 +142,21 @@ fn the_median_takes_the_middle_value_and_the_lower_one_on_ties() {
     assert_eq!(median(&[3, 1, 2]), 2);
     assert_eq!(median(&[4, 1, 3, 2]), 2);
     assert_eq!(median(&[]), 0);
+}
+
+#[tokio::test]
+async fn a_review_with_blocking_gaps_is_an_error_not_a_score() {
+    let scripted = Arc::new(ScriptModel {
+        synthesis: ONE_FINDING.to_string(),
+        contested_lens: false,
+        failing_agent: false,
+        failing_security_agent: true,
+        calls: AtomicUsize::new(0),
+    });
+    let error = run_case(&scripted, &case(vec![panic_bug()]), 4)
+        .await
+        .expect_err("blocking gap");
+    assert_eq!(error.case_id, "case-a");
+    assert_eq!(error.run, 4);
+    assert!(error.to_string().contains("blocking coverage gaps"));
 }
