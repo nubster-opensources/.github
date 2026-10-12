@@ -16,13 +16,13 @@ const LENS_WINDOW_LINES: u32 = 40;
 
 /// The PR diff in two shapes: a concatenated view and a per-file patch map.
 pub struct DiffContext {
-    pub full: String,
-    pub by_file: HashMap<String, String>,
-    pub head_files: HashMap<String, String>,
-    pub file_count: usize,
-    pub files: Vec<ChangedFile>,
-    pub batches: Vec<ReviewBatch>,
-    pub coverage_gaps: Vec<CoverageGap>,
+    pub(crate) full: String,
+    pub(crate) by_file: HashMap<String, String>,
+    pub(crate) head_files: HashMap<String, String>,
+    pub(crate) file_count: usize,
+    pub(crate) files: Vec<ChangedFile>,
+    pub(crate) batches: Vec<ReviewBatch>,
+    pub(crate) coverage_gaps: Vec<CoverageGap>,
 }
 
 impl DiffContext {

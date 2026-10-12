@@ -24,6 +24,7 @@ pub enum ChangedFileStatus {
 /// Availability of the textual patch returned by GitHub.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PatchAvailability {
+    /// The patch text provided by the forge.
     Present(String),
     /// GitHub did not provide a patch and did not expose enough metadata to
     /// distinguish a large/truncated file from another unsupported patch.
@@ -33,12 +34,19 @@ pub enum PatchAvailability {
 /// One changed file with the metadata required to account for review coverage.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChangedFile {
+    /// Path of the file in the head commit.
     pub path: String,
+    /// How the file changed.
     pub status: ChangedFileStatus,
+    /// Path before a rename or copy, when there is one.
     pub previous_path: Option<String>,
+    /// Number of added lines.
     pub additions: u64,
+    /// Number of deleted lines.
     pub deletions: u64,
+    /// Textual patch of the file, when available.
     pub patch: PatchAvailability,
+    /// Line numbers, in the head file, of the added lines.
     pub added_lines: BTreeSet<u32>,
 }
 
@@ -120,9 +128,13 @@ pub enum ReviewPriority {
 /// Explicit accounting for one piece of review input that was not analysed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoverageGap {
+    /// Why the input was not analysed.
     pub kind: CoverageGapKind,
+    /// Path of the file concerned.
     pub file: String,
+    /// Human readable detail of the gap.
     pub detail: String,
+    /// Priority of the file concerned.
     pub priority: ReviewPriority,
 }
 
@@ -155,6 +167,7 @@ pub struct ReviewBatch {
     pub files: Vec<String>,
 }
 
+/// How serious a finding is.
 #[derive(Debug, Deserialize, Clone, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum Severity {
@@ -324,16 +337,23 @@ impl Category {
 /// A finding merged by the synthesis agent, tracking which agents raised it.
 #[derive(Debug, Deserialize, Clone)]
 pub struct SynthFinding {
+    /// Path of the file the finding is about.
     pub file: String,
+    /// Line of the finding in the head file, 0 when unknown.
     #[serde(default)]
     pub line: u32,
+    /// Severity of the finding.
     #[serde(default = "default_severity")]
     pub severity: Severity,
+    /// Category of the finding.
     #[serde(default = "default_category")]
     pub category: Category,
+    /// Description of the finding, in English.
     pub message: String,
+    /// Description of the finding, in French.
     #[serde(default)]
     pub message_fr: String,
+    /// Names of the agents that raised the finding.
     #[serde(default)]
     pub sources: Vec<String>,
 }
@@ -365,8 +385,11 @@ pub struct LensVerdict {
 /// Aggregated verdict for one finding after the multi-lens vote.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FindingVerdict {
+    /// Whether the vote contests the finding.
     pub contested: bool,
+    /// Reasons given by the lenses, in English.
     pub reasons: Vec<String>,
+    /// Reasons given by the lenses, in French.
     pub reasons_fr: Vec<String>,
 }
 

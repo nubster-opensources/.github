@@ -1,5 +1,7 @@
 //! Pull request review and description tooling powered by the Mistral API.
 
+#![warn(missing_docs)]
+
 mod batching;
 mod diff_context;
 mod github;
