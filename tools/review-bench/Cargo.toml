@@ -1,0 +1,30 @@
+[package]
+name = "review-bench"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+license = "MIT OR Apache-2.0"
+description = "Measures the ai-review team review against a corpus of known bugs."
+publish = false
+
+[lib]
+name = "review_bench"
+path = "src/lib.rs"
+
+[[bin]]
+name = "review-bench"
+path = "src/main.rs"
+
+[dependencies]
+ai-review = { version = "0.1.0", path = "../ai-review" }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["full"] }
+toml = "0.8"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all       = { level = "warn", priority = -1 }
+pedantic  = { level = "warn", priority = -1 }

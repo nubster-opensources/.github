@@ -1,0 +1,8 @@
+origin = "real"
+pull_request = "nubster-opensources/example#1"
+
+[[files]]
+path = "src/lib.rs"
+status = "modified"
+additions = 1
+deletions = 0
