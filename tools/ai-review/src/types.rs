@@ -5,18 +5,26 @@ use serde::{Deserialize, Serialize};
 /// Normalised status of a file changed by a pull request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChangedFileStatus {
+    /// File added by the pull request.
     Added,
+    /// File removed by the pull request.
     Removed,
+    /// File modified in place.
     Modified,
+    /// File renamed, possibly with edits.
     Renamed,
+    /// File copied from another path.
     Copied,
+    /// File whose mode or type changed.
     Changed,
+    /// File listed without any change.
     Unchanged,
 }
 
 /// Availability of the textual patch returned by GitHub.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PatchAvailability {
+    /// The patch text provided by the forge.
     Present(String),
     /// GitHub did not provide a patch and did not expose enough metadata to
     /// distinguish a large/truncated file from another unsupported patch.
@@ -26,22 +34,58 @@ pub enum PatchAvailability {
 /// One changed file with the metadata required to account for review coverage.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChangedFile {
+    /// Path of the file in the head commit.
     pub path: String,
+    /// How the file changed.
     pub status: ChangedFileStatus,
+    /// Path before a rename or copy, when there is one.
     pub previous_path: Option<String>,
+    /// Number of added lines.
     pub additions: u64,
+    /// Number of deleted lines.
     pub deletions: u64,
+    /// Textual patch of the file, when available.
     pub patch: PatchAvailability,
+    /// Line numbers, in the head file, of the added lines.
     pub added_lines: BTreeSet<u32>,
 }
 
 impl ChangedFile {
+    /// Builds a changed file whose added lines are always derived from its patch.
+    /// An empty or absent patch is recorded as missing.
+    #[must_use]
+    pub fn from_patch(
+        path: String,
+        status: ChangedFileStatus,
+        diff_patch: Option<String>,
+        additions: u64,
+        deletions: u64,
+    ) -> Self {
+        let availability = diff_patch
+            .filter(|text| !text.is_empty())
+            .map_or(PatchAvailability::Missing, PatchAvailability::Present);
+        let added_lines = match &availability {
+            PatchAvailability::Present(text) => crate::diff_context::parse_added_lines(text),
+            PatchAvailability::Missing => BTreeSet::new(),
+        };
+        Self {
+            path,
+            status,
+            previous_path: None,
+            additions,
+            deletions,
+            patch: availability,
+            added_lines,
+        }
+    }
+
     /// Whether a missing patch is explained by the file holding binary content.
     ///
     /// The files endpoint omits the patch for two unrelated reasons, binary
     /// content and a diff too large to inline, and separates them only through
     /// the line counts: binary content reports none, an omitted patch keeps
     /// its own. A file whose patch is present is never in question.
+    #[must_use]
     pub fn has_binary_content(&self) -> bool {
         matches!(self.patch, PatchAvailability::Missing)
             && self.additions == 0
@@ -52,30 +96,45 @@ impl ChangedFile {
 /// Reason why part of a pull request could not be put in a model batch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CoverageGapKind {
+    /// The forge returned no textual patch for the file.
     PatchUnavailable,
+    /// The file holds binary content with no textual patch.
     BinaryContent,
+    /// The patch could not be parsed.
     MalformedPatch,
+    /// The input did not fit in the model batch budget.
     BatchBudgetExceeded,
+    /// A single line exceeded the batch budget.
     OversizedLine,
+    /// A specialist agent failed on a batch.
     AgentFailed,
+    /// The synthesis of a batch failed.
     SynthesisFailed,
+    /// The forge file list was incomplete.
     GitHubFileListIncomplete,
 }
 
 /// Ranks review input by how much a missed review would cost.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ReviewPriority {
+    /// Source code, the costliest input to miss.
     SourceCode,
+    /// Configuration files.
     Configuration,
+    /// Documentation and other prose.
     Prose,
 }
 
 /// Explicit accounting for one piece of review input that was not analysed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoverageGap {
+    /// Why the input was not analysed.
     pub kind: CoverageGapKind,
+    /// Path of the file concerned.
     pub file: String,
+    /// Human readable detail of the gap.
     pub detail: String,
+    /// Priority of the file concerned.
     pub priority: ReviewPriority,
 }
 
@@ -90,6 +149,7 @@ impl CoverageGap {
     /// request permanently red for cutting text nobody needed to read. Every
     /// other kind marks text a reviewer needed and did not get, so the run
     /// cannot honestly claim to have covered the change.
+    #[must_use]
     pub fn is_blocking(&self) -> bool {
         match self.kind {
             CoverageGapKind::BinaryContent => false,
@@ -107,10 +167,13 @@ pub struct ReviewBatch {
     pub files: Vec<String>,
 }
 
+/// How serious a finding is.
 #[derive(Debug, Deserialize, Clone, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum Severity {
+    /// A problem that must be fixed before merging.
     Critical,
+    /// A problem worth fixing that does not block the merge.
     Minor,
 }
 
@@ -191,14 +254,19 @@ impl Mode {
 /// One of the four specialised review angles run in parallel in team mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Agent {
+    /// Reviews logic and correctness.
     Correctness,
+    /// Reviews security.
     Security,
+    /// Reviews design and structure.
     Architecture,
+    /// Reviews performance.
     Performance,
 }
 
 impl Agent {
     /// Returns the human-readable label for this agent.
+    #[must_use]
     pub fn label(self) -> &'static str {
         match self {
             Self::Correctness => "Correctness",
@@ -212,13 +280,17 @@ impl Agent {
 /// One adversarial lens applied to a synthesised finding during verification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Lens {
+    /// Checks that the code confirms the finding.
     CodeConfirms,
+    /// Checks that the finding has a real impact.
     RealImpact,
+    /// Looks for reasons the finding is a false positive.
     FalsePositive,
 }
 
 impl Lens {
     /// Returns the human-readable label for this lens.
+    #[must_use]
     pub fn label(self) -> &'static str {
         match self {
             Self::CodeConfirms => "code-confirms",
@@ -232,17 +304,24 @@ impl Lens {
 #[derive(Debug, Deserialize, Clone, Copy, PartialEq)]
 #[serde(rename_all = "kebab-case")]
 pub enum Category {
+    /// A defect in behaviour.
     Bug,
+    /// A security weakness.
     Security,
+    /// A design or structure issue.
     Design,
+    /// A performance issue.
     Performance,
+    /// Missing test coverage.
     TestGap,
     #[serde(other)]
+    /// Any other kind of issue.
     Other,
 }
 
 impl Category {
     /// Returns the human-readable label for this category.
+    #[must_use]
     pub fn label(self) -> &'static str {
         match self {
             Self::Bug => "bug",
@@ -258,16 +337,23 @@ impl Category {
 /// A finding merged by the synthesis agent, tracking which agents raised it.
 #[derive(Debug, Deserialize, Clone)]
 pub struct SynthFinding {
+    /// Path of the file the finding is about.
     pub file: String,
+    /// Line of the finding in the head file, 0 when unknown.
     #[serde(default)]
     pub line: u32,
+    /// Severity of the finding.
     #[serde(default = "default_severity")]
     pub severity: Severity,
+    /// Category of the finding.
     #[serde(default = "default_category")]
     pub category: Category,
+    /// Description of the finding, in English.
     pub message: String,
+    /// Description of the finding, in French.
     #[serde(default)]
     pub message_fr: String,
+    /// Names of the agents that raised the finding.
     #[serde(default)]
     pub sources: Vec<String>,
 }
@@ -299,17 +385,24 @@ pub struct LensVerdict {
 /// Aggregated verdict for one finding after the multi-lens vote.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FindingVerdict {
+    /// Whether the vote contests the finding.
     pub contested: bool,
+    /// Reasons given by the lenses, in English.
     pub reasons: Vec<String>,
+    /// Reasons given by the lenses, in French.
     pub reasons_fr: Vec<String>,
 }
 
 /// Final overall verdict computed deterministically after verification.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Verdict {
+    /// Nothing blocks the merge.
     Ship,
+    /// Confirmed critical findings block the merge.
     NeedsWork,
+    /// Only contested or minor findings remain.
     Discuss,
+    /// Coverage was incomplete, so the run cannot vouch for the change.
     Incomplete,
 }
 
@@ -567,5 +660,44 @@ mod tests {
             gap(CoverageGapKind::PatchUnavailable, ReviewPriority::Prose).is_blocking(),
             "every other gap kind still blocks regardless of priority"
         );
+    }
+
+    const TWO_ADDED_LINES: &str = "@@ -1,2 +1,4 @@
+ fn main() {
++    first();
++    second();
+ }";
+
+    #[test]
+    fn a_file_built_from_its_patch_derives_the_added_lines() {
+        let file = ChangedFile::from_patch(
+            "src/lib.rs".to_string(),
+            ChangedFileStatus::Modified,
+            Some(TWO_ADDED_LINES.to_string()),
+            2,
+            0,
+        );
+        assert_eq!(file.added_lines, BTreeSet::from([2, 3]));
+        assert_eq!(
+            file.patch,
+            PatchAvailability::Present(TWO_ADDED_LINES.to_string())
+        );
+        assert_eq!(file.previous_path, None);
+    }
+
+    #[test]
+    fn an_empty_or_absent_patch_is_recorded_as_missing() {
+        for patch in [None, Some(String::new())] {
+            let file = ChangedFile::from_patch(
+                "assets/logo.png".to_string(),
+                ChangedFileStatus::Added,
+                patch,
+                0,
+                0,
+            );
+            assert_eq!(file.patch, PatchAvailability::Missing);
+            assert!(file.added_lines.is_empty());
+            assert!(file.has_binary_content());
+        }
     }
 }

@@ -1,0 +1,8 @@
+origin = "injected"
+
+[[files]]
+path = "src/lib.rs"
+status = "modified"
+patch = "../valid-injected/patches/lib.patch"
+additions = 1
+deletions = 0

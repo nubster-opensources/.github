@@ -3,10 +3,10 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use crate::github::{parse_added_lines, DiffContext};
+use crate::diff_context::DiffContext;
 use crate::head_file_source::HeadFileSource;
 use crate::language_model::{CallPurpose, ChatRequest, LanguageModel};
-use crate::types::{ChangedFile, ChangedFileStatus, PatchAvailability};
+use crate::types::{ChangedFile, ChangedFileStatus};
 
 type Responder = dyn Fn(&ChatRequest) -> anyhow::Result<String> + Send + Sync;
 
@@ -62,15 +62,13 @@ impl HeadFileSource for MapHeadFiles {
 }
 
 pub(crate) fn source_file(file_path: &str, diff_patch: &str) -> ChangedFile {
-    ChangedFile {
-        path: file_path.to_string(),
-        status: ChangedFileStatus::Modified,
-        previous_path: None,
-        additions: 1,
-        deletions: 0,
-        patch: PatchAvailability::Present(diff_patch.to_string()),
-        added_lines: parse_added_lines(diff_patch),
-    }
+    ChangedFile::from_patch(
+        file_path.to_string(),
+        ChangedFileStatus::Modified,
+        Some(diff_patch.to_string()),
+        1,
+        0,
+    )
 }
 
 pub(crate) fn review_context(files: Vec<ChangedFile>) -> DiffContext {

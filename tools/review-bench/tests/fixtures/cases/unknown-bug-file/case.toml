@@ -1,0 +1,12 @@
+origin = "injected"
+
+[[files]]
+path = "src/lib.rs"
+status = "modified"
+additions = 1
+deletions = 0
+
+[[expected_bugs]]
+file = "src/other.rs"
+lines = [1, 1]
+keywords = ["panic"]
